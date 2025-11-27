@@ -27,16 +27,18 @@ export default {
             }
             if (url.searchParams.has("socks5")) {
                 const 代理参数 = url.searchParams.get("socks5");
-                return await 检测SOCKS5代理(代理参数);
+                return new Response(JSON.stringify(await SOCKS5可用性验证('socks5', 代理参数)));
             } else if (url.searchParams.has("http")) {
                 const 代理参数 = url.searchParams.get("http");
-                return await 检测HTTP代理(代理参数);
+                return new Response(JSON.stringify(await SOCKS5可用性验证('http', 代理参数)));
             } else if (url.searchParams.has("proxy")) {
                 const 代理参数 = url.searchParams.get("proxy");
                 if (代理参数.toLowerCase().startsWith("socks5://")) {
-                    return await 检测SOCKS5代理(代理参数);
+                    return new Response(JSON.stringify(await SOCKS5可用性验证('socks5', 代理参数.split("socks5://")[1])));
                 } else if (代理参数.toLowerCase().startsWith("http://")) {
-                    return await 检测HTTP代理(代理参数);
+                    return new Response(JSON.stringify(await SOCKS5可用性验证('http', 代理参数.split("http://")[1])));
+                } else if (代理参数.toLowerCase().startsWith("https://")) {
+                    return new Response(JSON.stringify(await SOCKS5可用性验证('https', 代理参数.split("https://")[1])));
                 }
             }
             // 如果没有提供有效的代理参数，返回错误响应
@@ -102,7 +104,7 @@ export default {
         else if (env.URL) return await 代理URL(env.URL, url);
         else {
             const 网站图标 = env.ICO ? `<link rel="icon" href="${env.ICO}" type="image/x-icon">` : '';
-            const 网络备案 = env.BEIAN || `&copy; 2025 Check Socks5/HTTP - 基于 Cloudflare Workers 构建的高性能代理验证服务 | by cmliu`;
+            const 网络备案 = env.BEIAN || `&copy; 2025 Check Socks5/HTTP - 基于 Cloudflare Workers 构建的高性能代理验证服务 | IP数据来源: ipapi.is | by: cmliu`;
             let img = 'background: #ffffff;';
             if (env.IMG) {
                 const imgs = await 整理(env.IMG);
@@ -112,423 +114,295 @@ export default {
         }
     },
 };
-
-async function 检测HTTP代理(代理参数) {
-    代理参数 = 代理参数.includes("://") ? 代理参数.split('://')[1] : 代理参数;
-    console.log("http://", 代理参数);
-    try {
-        parsedSocks5Address = socks5AddressParser(代理参数);
-    } catch (err) {
-        let e = err;
-        console.log(e.toString());
-        return new Response(JSON.stringify({
-            success: false,
-            error: e.toString(),
-            proxy: "http://" + 代理参数
-        }, null, 2), {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-
-    try {
-        const result = await checkHttpProxy('check.socks5.090227.xyz', 80, '/cdn-cgi/trace');
-        const 代理落地IP = result.match(/ip=(.*)/)[1];
-
-        // 直接调用IP查询逻辑，而不是发送HTTP请求
-        const ipInfo = await getIpInfo(代理落地IP);
-
-        // 返回数据给客户端，并添加CORS头
-        return new Response(JSON.stringify({
-            success: true,
-            proxy: "http://" + 代理参数,
-            ...ipInfo
-        }, null, 4), {
-            headers: {
-                "content-type": "application/json; charset=UTF-8",
-                'Access-Control-Allow-Origin': '*'
-            }
-        });
-    } catch (error) {
-        return new Response(JSON.stringify({
-            success: false,
-            error: error.message,
-            proxy: "http://" + 代理参数
-        }, null, 2), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-}
-
-async function 检测SOCKS5代理(代理参数) {
-    代理参数 = 代理参数.includes("://") ? 代理参数.split('://')[1] : 代理参数;
-    console.log("socks5://", 代理参数);
-    try {
-        parsedSocks5Address = socks5AddressParser(代理参数);
-    } catch (err) {
-        let e = err;
-        console.log(e.toString());
-        return new Response(JSON.stringify({
-            success: false,
-            error: e.toString(),
-            proxy: "socks5://" + 代理参数
-        }, null, 2), {
-            status: 400,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-
-    try {
-        const result = await checkSocks5Proxy('check.socks5.090227.xyz', 80, '/cdn-cgi/trace');
-        const 代理落地IP = result.match(/ip=(.*)/)[1];
-
-        // 直接调用IP查询逻辑，而不是发送HTTP请求
-        const ipInfo = await getIpInfo(代理落地IP);
-
-        // 返回数据给客户端，并添加CORS头
-        return new Response(JSON.stringify({
-            success: true,
-            proxy: "socks5://" + 代理参数,
-            ...ipInfo
-        }, null, 4), {
-            headers: {
-                "content-type": "application/json; charset=UTF-8",
-                'Access-Control-Allow-Origin': '*'
-            }
-        });
-
-    } catch (error) {
-        return new Response(JSON.stringify({
-            success: false,
-            error: error.message,
-            proxy: "socks5://" + 代理参数
-        }, null, 2), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-}
-
-/**
- * 检测HTTP代理并发送HTTP请求
- * @param {string} hostname 目标主机名
- * @param {number} port 目标端口
- * @param {string} path HTTP请求路径
- */
-async function checkHttpProxy(hostname, port, path) {
-    const tcpSocket = await httpConnect(hostname, port);
-
-    if (!tcpSocket) {
-        throw new Error('HTTP代理连接失败');
-    }
-
-    try {
-        // 发送HTTP请求
-        const httpRequest = `GET ${path} HTTP/1.1\r\nHost: ${hostname}\r\nConnection: close\r\n\r\n`;
-        const writer = tcpSocket.writable.getWriter();
-        const encoder = new TextEncoder();
-
-        await writer.write(encoder.encode(httpRequest));
-        console.log('已发送HTTP请求');
-
-        writer.releaseLock();
-
-        // 读取HTTP响应
-        const reader = tcpSocket.readable.getReader();
-        const decoder = new TextDecoder();
-        let response = '';
-
-        try {
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                response += decoder.decode(value, { stream: true });
-            }
-        } finally {
-            reader.releaseLock();
-        }
-
-        // 关闭连接
-        await tcpSocket.close();
-
-        return response;
-    } catch (error) {
-        // 确保连接被关闭
-        try {
-            await tcpSocket.close();
-        } catch (closeError) {
-            console.log('关闭连接时出错:', closeError);
-        }
-        throw error;
-    }
-}
-
-/**
- * 检测SOCKS5代理并发送HTTP请求
- * @param {string} hostname 目标主机名
- * @param {number} port 目标端口
- * @param {string} path HTTP请求路径
- */
-async function checkSocks5Proxy(hostname, port, path) {
-    const tcpSocket = await socks5Connect(2, hostname, port);
-
-    if (!tcpSocket) {
-        throw new Error('SOCKS5连接失败');
-    }
-
-    try {
-        // 发送HTTP请求
-        const httpRequest = `GET ${path} HTTP/1.1\r\nHost: ${hostname}\r\nConnection: close\r\n\r\n`;
-        const writer = tcpSocket.writable.getWriter();
-        const encoder = new TextEncoder();
-
-        await writer.write(encoder.encode(httpRequest));
-        console.log('已发送HTTP请求');
-
-        writer.releaseLock();
-
-        // 读取HTTP响应
-        const reader = tcpSocket.readable.getReader();
-        const decoder = new TextDecoder();
-        let response = '';
-
-        try {
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                response += decoder.decode(value, { stream: true });
-            }
-        } finally {
-            reader.releaseLock();
-        }
-
-        // 关闭连接
-        await tcpSocket.close();
-
-        return response;
-    } catch (error) {
-        // 确保连接被关闭
-        try {
-            await tcpSocket.close();
-        } catch (closeError) {
-            console.log('关闭连接时出错:', closeError);
-        }
-        throw error;
-    }
-}
-
-function socks5AddressParser(address) {
-    // 使用 "@" 分割地址，分为认证部分和服务器地址部分
-    const lastAtIndex = address.lastIndexOf("@");
-    let [latter, former] = lastAtIndex === -1 ? [address, undefined] : [address.substring(lastAtIndex + 1), address.substring(0, lastAtIndex)];
-    let username, password, hostname, port;
-
-    // 如果存在 former 部分，说明提供了认证信息
-    if (former) {
-        const formers = former.split(":");
-        if (formers.length !== 2) {
-            throw new Error('无效的 SOCKS 地址格式：认证部分必须是 "username:password" 的形式');
-        }
-        [username, password] = formers;
-    }
-
-    // 解析服务器地址部分
-    const latters = latter.split(":");
-    // 检查是否是IPv6地址带端口格式 [xxx]:port
-    if (latters.length > 2 && latter.includes("]:")) {
-        // IPv6地址带端口格式：[2001:db8::1]:8080
-        port = Number(latter.split("]:")[1].replace(/[^\d]/g, ''));
-        hostname = latter.split("]:")[0] + "]"; // 正确提取hostname部分
-    } else if (latters.length === 2) {
-        // IPv4地址带端口或域名带端口
-        port = Number(latters.pop().replace(/[^\d]/g, ''));
-        hostname = latters.join(":");
-    } else {
-        port = 80;
-        hostname = latter;
-    }
+///////////////////////////////////////////功能性函数//////////////////////////////////////////
+async function SOCKS5可用性验证(代理协议 = 'socks5', 代理参数) {
+    // 记录开始时间
+    const startTime = Date.now();
     
-    if (isNaN(port)) {
-        throw new Error('无效的 SOCKS 地址格式：端口号必须是数字');
+    // 解析代理参数
+    try {
+        parsedSocks5Address = await 获取SOCKS5账号(代理参数);
+    } catch (err) {
+        return {
+            success: false,
+            error: err.message,
+            proxy: 代理协议 + "://" + 代理参数,
+            responseTime: Date.now() - startTime
+        };
     }
 
-    // 处理 IPv6 地址的特殊情况
-    // IPv6 地址包含多个冒号，所以必须用方括号括起来，如 [2001:db8::1]
-    const regex = /^\[.*\]$/;
-    if (hostname.includes(":") && !regex.test(hostname)) {
-        throw new Error('无效的 SOCKS 地址格式：IPv6 地址必须用方括号括起来，如 [2001:db8::1]');
-    }
+    const { username, password, hostname, port } = parsedSocks5Address;
+    const 完整代理参数 = username && password
+        ? `${username}:${password}@${hostname}:${port}`
+        : `${hostname}:${port}`;
 
-    //if (/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?).){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/.test(hostname)) hostname = `${atob('d3d3Lg==')}${hostname}${atob('LmlwLjA5MDIyNy54eXo=')}`;
-    // 返回解析后的结果
-    return {
-        username,  // 用户名，如果没有则为 undefined
-        password,  // 密码，如果没有则为 undefined
-        hostname,  // 主机名，可以是域名、IPv4 或 IPv6 地址
-        port,	 // 端口号，已转换为数字类型
+    try {
+        // 根据协议类型建立连接
+        const tcpSocket = 代理协议 == 'socks5'
+            ? await socks5Connect('check.socks5.090227.xyz', 80)
+            : await httpConnect('check.socks5.090227.xyz', 80);
+
+        if (!tcpSocket) {
+            return {
+                success: false,
+                error: '无法连接到代理服务器',
+                proxy: 代理协议 + "://" + 完整代理参数,
+                responseTime: Date.now() - startTime
+            };
+        }
+
+        try {
+            // 发送HTTP请求
+            const writer = tcpSocket.writable.getWriter();
+            const encoder = new TextEncoder();
+            const request = `GET /cdn-cgi/trace HTTP/1.1\r\nHost: check.socks5.090227.xyz\r\nConnection: close\r\n\r\n`;
+            await writer.write(encoder.encode(request));
+            writer.releaseLock();
+
+            // 读取响应
+            const reader = tcpSocket.readable.getReader();
+            const decoder = new TextDecoder();
+            let response = '';
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    response += decoder.decode(value, { stream: true });
+                }
+            } finally {
+                reader.releaseLock();
+            }
+
+            // 关闭连接
+            await tcpSocket.close();
+
+            // 解析响应获取IP和位置信息
+            const ipMatch = response.match(/ip=(.*)/);
+            const locMatch = response.match(/loc=(.*)/);
+            const 代理落地IP = response.match(/ip=(.*)/)[1];
+
+            // 直接调用IP查询逻辑，而不是发送HTTP请求
+            const ipInfo = await getIpInfo(代理落地IP);
+            return {
+                success: true,
+                proxy: 代理协议 + "://" + 完整代理参数,
+                ip: ipMatch ? ipMatch[1] : 'N/A',
+                loc: locMatch ? locMatch[1] : 'N/A',
+                responseTime: Date.now() - startTime,
+                ...ipInfo
+            };
+        } catch (error) {
+            // 清理连接资源
+            try {
+                await tcpSocket.close();
+            } catch (e) {
+                console.log('关闭连接时出错:', e);
+            }
+
+            return {
+                success: false,
+                error: error.message,
+                proxy: 代理协议 + "://" + 完整代理参数,
+                responseTime: Date.now() - startTime
+            };
+        }
+    } catch (error) {
+        return {
+            success: false,
+            error: error.message,
+            proxy: 代理协议 + "://" + 代理参数,
+            responseTime: Date.now() - startTime
+        };
     }
 }
 
-/**
- * 建立 SOCKS5 代理连接
- * @param {number} addressType 目标地址类型（1: IPv4, 2: 域名, 3: IPv6）
- * @param {string} addressRemote 目标地址（可以是 IP 或域名）
- * @param {number} portRemote 目标端口
- */
-async function socks5Connect(addressType, addressRemote, portRemote) {
+async function 获取SOCKS5账号(address) {
+    if (address.includes('@')) {
+        const lastAtIndex = address.lastIndexOf('@');
+        let userPassword = address.substring(0, lastAtIndex).replaceAll('%3D', '=');
+        const base64Regex = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i;
+        if (base64Regex.test(userPassword) && !userPassword.includes(':')) userPassword = atob(userPassword);
+        address = `${userPassword}@${address.substring(lastAtIndex + 1)}`;
+    }
+    const atIndex = address.lastIndexOf("@");
+    const [hostPart, authPart] = atIndex === -1 ? [address, undefined] : [address.substring(atIndex + 1), address.substring(0, atIndex)];
+
+    // 解析认证
+    let username, password;
+    if (authPart) {
+        [username, password] = authPart.split(":");
+        if (!password) throw new Error('无效的 SOCKS 地址格式：认证部分必须是 "username:password" 的形式');
+    }
+
+    // 解析主机端口
+    let hostname, port;
+    if (hostPart.includes("]:")) { // IPv6带端口
+        [hostname, port] = [hostPart.split("]:")[0] + "]", Number(hostPart.split("]:")[1].replace(/[^\d]/g, ''))];
+    } else if (hostPart.startsWith("[")) { // IPv6无端口
+        [hostname, port] = [hostPart, 80];
+    } else { // IPv4/域名
+        const parts = hostPart.split(":");
+        [hostname, port] = parts.length === 2 ? [parts[0], Number(parts[1].replace(/[^\d]/g, ''))] : [hostPart, 80];
+    }
+
+    if (isNaN(port)) throw new Error('无效的 SOCKS 地址格式：端口号必须是数字');
+    if (hostname.includes(":") && !/^\[.*\]$/.test(hostname)) throw new Error('无效的 SOCKS 地址格式：IPv6 地址必须用方括号括起来，如 [2001:db8::1]');
+
+    return { username, password, hostname, port };
+}
+
+////////////////////////////////SOCKS5/HTTP函数///////////////////////////////////////////////
+async function httpConnect(addressRemote, portRemote) {
     const { username, password, hostname, port } = parsedSocks5Address;
-
-    let socket;
+    const sock = await connect({ hostname, port });
+    const writer = sock.writable.getWriter();
+    const reader = sock.readable.getReader();
+    
     try {
-        // 连接到 SOCKS5 代理服务器
-        socket = connect({
-            hostname, // SOCKS5 服务器的主机名
-            port,     // SOCKS5 服务器的端口
-        });
-
-        // 请求头格式（Worker -> SOCKS5 服务器）:
-        // +----+----------+----------+
-        // |VER | NMETHODS | METHODS  |
-        // +----+----------+----------+
-        // | 1  |    1     | 1 to 255 |
-        // +----+----------+----------+
-
-        // https://en.wikipedia.org/wiki/SOCKS#SOCKS5
-        // METHODS 字段的含义:
-        // 0x00 不需要认证
-        // 0x02 用户名/密码认证 https://datatracker.ietf.org/doc/html/rfc1929
-        const socksGreeting = new Uint8Array([5, 2, 0, 2]);
-        // 5: SOCKS5 版本号, 2: 支持的认证方法数, 0和2: 两种认证方法（无认证和用户名/密码）
-
-        const writer = socket.writable.getWriter();
-
-        await writer.write(socksGreeting);
-        console.log('已发送 SOCKS5 问候消息');
-
-        const reader = socket.readable.getReader();
-        const encoder = new TextEncoder();
-        let res = (await reader.read()).value;
-        // 响应格式（SOCKS5 服务器 -> Worker）:
-        // +----+--------+
-        // |VER | METHOD |
-        // +----+--------+
-        // | 1  |   1    |
-        // +----+--------+
-        if (res[0] !== 0x05) {
-            console.log(`SOCKS5 服务器版本错误: 收到 ${res[0]}，期望是 5`);
-            throw new Error(`SOCKS5 服务器版本错误: 收到 ${res[0]}，期望是 5`);
+        // 构建 HTTP CONNECT 请求
+        let connectRequest = `CONNECT ${addressRemote}:${portRemote} HTTP/1.1\r\n`;
+        connectRequest += `Host: ${addressRemote}:${portRemote}\r\n`;
+        
+        // 如果有用户名和密码,添加 Proxy-Authorization 头
+        if (username && password) {
+            const auth = btoa(`${username}:${password}`);
+            connectRequest += `Proxy-Authorization: Basic ${auth}\r\n`;
         }
-        if (res[1] === 0xff) {
-            console.log("服务器不接受任何认证方法");
-            throw new Error("服务器不接受任何认证方法");
-        }
-
-        // 如果返回 0x0502，表示需要用户名/密码认证
-        if (res[1] === 0x02) {
-            console.log("SOCKS5 服务器需要认证");
-            if (!username || !password) {
-                console.log("请提供用户名和密码");
-                throw new Error("请提供用户名和密码");
+        
+        connectRequest += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n`;
+        connectRequest += `Proxy-Connection: Keep-Alive\r\n`;
+        connectRequest += `Connection: Keep-Alive\r\n`;
+        connectRequest += '\r\n';
+        
+        // 发送 CONNECT 请求
+        await writer.write(new TextEncoder().encode(connectRequest));
+        
+        // 读取响应头
+        let responseBuffer = new Uint8Array(0);
+        let headerEndIndex = -1;
+        let bytesRead = 0;
+        const maxHeaderSize = 8192; // 最大响应头大小
+        
+        // 循环读取数据直到找到响应头结束标记
+        while (headerEndIndex === -1 && bytesRead < maxHeaderSize) {
+            const { done, value } = await reader.read();
+            if (done) {
+                throw new Error('HTTP代理连接中断，未收到完整响应');
             }
-            // 认证请求格式:
-            // +----+------+----------+------+----------+
-            // |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
-            // +----+------+----------+------+----------+
-            // | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
-            // +----+------+----------+------+----------+
-            const authRequest = new Uint8Array([
-                1,                       // 认证子协议版本
-                username.length,         // 用户名长度
-                ...encoder.encode(username), // 用户名
-                password.length,         // 密码长度
-                ...encoder.encode(password)  // 密码
-            ]);
-            await writer.write(authRequest);
-            res = (await reader.read()).value;
-            // 期望返回 0x0100 表示认证成功
-            if (res[0] !== 0x01 || res[1] !== 0x00) {
-                console.log("SOCKS5 服务器认证失败");
-                throw new Error("SOCKS5 服务器认证失败");
+            
+            // 合并新数据到缓冲区
+            const newBuffer = new Uint8Array(responseBuffer.length + value.length);
+            newBuffer.set(responseBuffer);
+            newBuffer.set(value, responseBuffer.length);
+            responseBuffer = newBuffer;
+            bytesRead = responseBuffer.length;
+            
+            // 查找响应头结束标记 \r\n\r\n
+            for (let i = 0; i < responseBuffer.length - 3; i++) {
+                if (responseBuffer[i] === 0x0d && responseBuffer[i + 1] === 0x0a &&
+                    responseBuffer[i + 2] === 0x0d && responseBuffer[i + 3] === 0x0a) {
+                    headerEndIndex = i + 4;
+                    break;
+                }
             }
         }
-
-        // 请求数据格式（Worker -> SOCKS5 服务器）:
-        // +----+-----+-------+------+----------+----------+
-        // |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-        // +----+-----+-------+------+----------+----------+
-        // | 1  |  1  | X'00' |  1   | Variable |    2     |
-        // +----+-----+-------+------+----------+----------+
-        // ATYP: 地址类型
-        // 0x01: IPv4 地址
-        // 0x03: 域名
-        // 0x04: IPv6 地址
-        // DST.ADDR: 目标地址
-        // DST.PORT: 目标端口（网络字节序）
-
-        // addressType
-        // 1 --> IPv4  地址长度 = 4
-        // 2 --> 域名
-        // 3 --> IPv6  地址长度 = 16
-        let DSTADDR;    // DSTADDR = ATYP + DST.ADDR
-        switch (addressType) {
-            case 1: // IPv4
-                DSTADDR = new Uint8Array(
-                    [1, ...addressRemote.split('.').map(Number)]
-                );
-                break;
-            case 2: // 域名
-                DSTADDR = new Uint8Array(
-                    [3, addressRemote.length, ...encoder.encode(addressRemote)]
-                );
-                break;
-            case 3: // IPv6
-                DSTADDR = new Uint8Array(
-                    [4, ...addressRemote.split(':').flatMap(x => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)])]
-                );
-                break;
-            default:
-                console.log(`无效的地址类型: ${addressType}`);
-                throw new Error(`无效的地址类型: ${addressType}`);
+        
+        if (headerEndIndex === -1) {
+            throw new Error('HTTP代理响应格式无效，未找到响应头结束标记');
         }
-        const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
-        // 5: SOCKS5版本, 1: 表示CONNECT请求, 0: 保留字段
-        // ...DSTADDR: 目标地址, portRemote >> 8 和 & 0xff: 将端口转为网络字节序
-        await writer.write(socksRequest);
-        console.log('已发送 SOCKS5 请求');
-
-        res = (await reader.read()).value;
-        // 响应格式（SOCKS5 服务器 -> Worker）:
-        //  +----+-----+-------+------+----------+----------+
-        // |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
-        // +----+-----+-------+------+----------+----------+
-        // | 1  |  1  | X'00' |  1   | Variable |    2     |
-        // +----+-----+-------+------+----------+----------+
-        if (res[1] === 0x00) {
-            console.log("SOCKS5 连接已建立");
-        } else {
-            console.log(`SOCKS5 连接建立失败，错误代码: ${res[1]}`);
-            throw new Error(`SOCKS5 连接建立失败，错误代码: ${res[1]}`);
+        
+        // 解析响应头
+        const headerText = new TextDecoder().decode(responseBuffer.slice(0, headerEndIndex));
+        const statusLine = headerText.split('\r\n')[0];
+        const statusMatch = statusLine.match(/HTTP\/\d\.\d\s+(\d+)/);
+        
+        if (!statusMatch) {
+            throw new Error(`HTTP代理响应格式无效: ${statusLine}`);
         }
-
-        // 在调用 startTls 之前必须释放 reader 和 writer 的锁
+        
+        const statusCode = parseInt(statusMatch[1]);
+        
+        // 检查状态码,支持 2xx 成功状态码
+        if (statusCode < 200 || statusCode >= 300) {
+            throw new Error(`HTTP代理连接失败 [${statusCode}]: ${statusLine}`);
+        }
+        
+        // 如果响应中有多余的数据(通常不应该有),需要处理
+        // 通过创建新的可读流来传递这些数据
+        if (headerEndIndex < responseBuffer.length) {
+            const remainingData = responseBuffer.slice(headerEndIndex);
+            const { readable, writable } = new TransformStream();
+            
+            // 将剩余数据写入新流
+            new ReadableStream({
+                start(controller) {
+                    controller.enqueue(remainingData);
+                }
+            }).pipeTo(writable).catch(() => {});
+            
+            // 替换 socket 的 readable 流
+            // @ts-ignore
+            sock.readable = readable;
+        }
+        
         writer.releaseLock();
         reader.releaseLock();
-
-        return socket;
+        
+        return sock;
+        
     } catch (error) {
-        // 如果连接建立失败，确保清理资源
-        if (socket) {
-            try {
-                await socket.close();
-            } catch (closeError) {
-                console.log('关闭失败的连接时出错:', closeError);
-            }
-        }
-        throw error;
+        // 清理资源
+        try {
+            writer.releaseLock();
+        } catch (e) {}
+        try {
+            reader.releaseLock();
+        } catch (e) {}
+        try {
+            sock.close();
+        } catch (e) {}
+        
+        throw new Error(`HTTP代理连接失败: ${error.message}`);
     }
 }
 
+async function socks5Connect(addressRemote, portRemote, addressType = 3) {
+    const { username, password, hostname, port } = parsedSocks5Address;
+    const socket = connect({ hostname, port });
+    const writer = socket.writable.getWriter();
+    const reader = socket.readable.getReader();
+    const encoder = new TextEncoder();
+
+    // SOCKS5 握手: VER(5) + NMETHODS(2) + METHODS(0x00,0x02)
+    await writer.write(new Uint8Array([5, 2, 0, 2]));
+    let res = (await reader.read()).value;
+    if (res[0] !== 0x05 || res[1] === 0xff) return;
+
+    // 如果需要用户名密码认证
+    if (res[1] === 0x02) {
+        if (!username || !password) return;
+        await writer.write(new Uint8Array([1, username.length, ...encoder.encode(username), password.length, ...encoder.encode(password)]));
+        res = (await reader.read()).value;
+        if (res[0] !== 0x01 || res[1] !== 0x00) return;
+    }
+
+    // 构建目标地址 (ATYP + DST.ADDR)
+    const DSTADDR = addressType === 1 ? new Uint8Array([1, ...addressRemote.split('.').map(Number)])
+        : addressType === 3 ? new Uint8Array([3, addressRemote.length, ...encoder.encode(addressRemote)])
+            : new Uint8Array([4, ...addressRemote.split(':').flatMap(x => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)])]);
+
+    // 发送连接请求: VER(5) + CMD(1=CONNECT) + RSV(0) + DSTADDR + DST.PORT
+    await writer.write(new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]));
+    res = (await reader.read()).value;
+    if (res[1] !== 0x00) return;
+
+    writer.releaseLock();
+    reader.releaseLock();
+    return socket;
+}
+
+////////////////////////////////////////////辅助函数///////////////////////////////////////////////
 /**
  * 获取IP信息的通用函数
  * @param {string} ip IP地址或域名
@@ -613,153 +487,6 @@ async function getIpInfo(ip) {
     return data;
 }
 
-/**
- * 建立 HTTP 代理连接
- * @param {string} addressRemote 目标地址（可以是 IP 或域名）
- * @param {number} portRemote 目标端口
- */
-async function httpConnect(addressRemote, portRemote) {
-    const { username, password, hostname, port } = parsedSocks5Address;
-    const sock = await connect({
-        hostname: hostname,
-        port: port
-    });
-
-    // 构建HTTP CONNECT请求
-    let connectRequest = `CONNECT ${addressRemote}:${portRemote} HTTP/1.1\r\n`;
-    connectRequest += `Host: ${addressRemote}:${portRemote}\r\n`;
-
-    // 添加代理认证（如果需要）
-    if (username && password) {
-        const authString = `${username}:${password}`;
-        const base64Auth = btoa(authString);
-        connectRequest += `Proxy-Authorization: Basic ${base64Auth}\r\n`;
-    }
-
-    connectRequest += `User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\n`;
-    connectRequest += `Proxy-Connection: Keep-Alive\r\n`;
-    connectRequest += `Connection: Keep-Alive\r\n`; // 添加标准 Connection 头
-    connectRequest += `\r\n`;
-
-    console.log(`正在连接到 ${addressRemote}:${portRemote} 通过代理 ${hostname}:${port}`);
-
-    try {
-        // 发送连接请求
-        const writer = sock.writable.getWriter();
-        await writer.write(new TextEncoder().encode(connectRequest));
-        writer.releaseLock();
-    } catch (err) {
-        console.error('发送HTTP CONNECT请求失败:', err);
-        throw new Error(`发送HTTP CONNECT请求失败: ${err.message}`);
-    }
-
-    // 读取HTTP响应
-    const reader = sock.readable.getReader();
-    let respText = '';
-    let connected = false;
-    let responseBuffer = new Uint8Array(0);
-
-    try {
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-                console.error('HTTP代理连接中断');
-                throw new Error('HTTP代理连接中断');
-            }
-
-            // 合并接收到的数据
-            const newBuffer = new Uint8Array(responseBuffer.length + value.length);
-            newBuffer.set(responseBuffer);
-            newBuffer.set(value, responseBuffer.length);
-            responseBuffer = newBuffer;
-
-            // 将收到的数据转换为文本
-            respText = new TextDecoder().decode(responseBuffer);
-
-            // 检查是否收到完整的HTTP响应头
-            if (respText.includes('\r\n\r\n')) {
-                // 分离HTTP头和可能的数据部分
-                const headersEndPos = respText.indexOf('\r\n\r\n') + 4;
-                const headers = respText.substring(0, headersEndPos);
-
-                console.log(`收到HTTP代理响应: ${headers.split('\r\n')[0]}`);
-
-                // 检查响应状态
-                if (headers.startsWith('HTTP/1.1 200') || headers.startsWith('HTTP/1.0 200')) {
-                    connected = true;
-
-                    // 如果响应头之后还有数据，我们需要保存这些数据以便后续处理
-                    if (headersEndPos < responseBuffer.length) {
-                        const remainingData = responseBuffer.slice(headersEndPos);
-                        // 创建一个缓冲区来存储这些数据，以便稍后使用
-                        const dataStream = new ReadableStream({
-                            start(controller) {
-                                controller.enqueue(remainingData);
-                            }
-                        });
-
-                        // 创建一个新的TransformStream来处理额外数据
-                        const { readable, writable } = new TransformStream();
-                        dataStream.pipeTo(writable).catch(err => console.error('处理剩余数据错误:', err));
-
-                        // 替换原始readable流
-                        // @ts-ignore
-                        sock.readable = readable;
-                    }
-                } else {
-                    const errorMsg = `HTTP代理连接失败: ${headers.split('\r\n')[0]}`;
-                    console.error(errorMsg);
-                    throw new Error(errorMsg);
-                }
-                break;
-            }
-        }
-    } catch (err) {
-        reader.releaseLock();
-        throw new Error(`处理HTTP代理响应失败: ${err.message}`);
-    }
-
-    reader.releaseLock();
-
-    if (!connected) {
-        throw new Error('HTTP代理连接失败: 未收到成功响应');
-    }
-
-    console.log(`HTTP代理连接成功: ${addressRemote}:${portRemote}`);
-    return sock;
-}
-
-async function nginx() {
-    const text = `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
-	
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
-	
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
-	`
-    return text;
-}
-
 async function 代理URL(代理网址, 目标网址) {
     const 网址列表 = await 整理(代理网址);
     const 完整网址 = 网址列表[Math.floor(Math.random() * 网址列表.length)];
@@ -800,14 +527,6 @@ async function 代理URL(代理网址, 目标网址) {
     return 新响应;
 }
 
-/**
- * 双重MD5哈希函数
- * 这个函数对输入文本进行两次MD5哈希，增强安全性
- * 第二次哈希使用第一次哈希结果的一部分作为输入
- * 
- * @param {string} 文本 要哈希的文本
- * @returns {Promise<string>} 双重哈希后的小写十六进制字符串
- */
 async function 双重哈希(文本) {
     const 编码器 = new TextEncoder();
 
@@ -861,6 +580,39 @@ async function fetchDNSRecords(domain, type) {
     // 解析响应数据
     const data = await response.json();
     return data.Answer || [];
+}
+
+////////////////////////////////////////////HTML///////////////////////////////////////////////
+
+async function nginx() {
+    const text = `
+	<!DOCTYPE html>
+	<html>
+	<head>
+	<title>Welcome to nginx!</title>
+	<style>
+		body {
+			width: 35em;
+			margin: 0 auto;
+			font-family: Tahoma, Verdana, Arial, sans-serif;
+		}
+	</style>
+	</head>
+	<body>
+	<h1>Welcome to nginx!</h1>
+	<p>If you see this page, the nginx web server is successfully installed and
+	working. Further configuration is required.</p>
+	
+	<p>For online documentation and support please refer to
+	<a href="http://nginx.org/">nginx.org</a>.<br/>
+	Commercial support is available at
+	<a href="http://nginx.com/">nginx.com</a>.</p>
+	
+	<p><em>Thank you for using nginx.</em></p>
+	</body>
+	</html>
+	`
+    return text;
 }
 
 async function HTML(网站图标, 网络备案, img) {
@@ -1517,7 +1269,7 @@ async function HTML(网站图标, 网络备案, img) {
             </div>
             
             <div class="info-card">
-                <h3>出口信息</h3>
+                <h3 id="exitInfoTitle">出口信息</h3>
                 <div class="info-content" id="exitInfo">
                     <div class="waiting">请输入代理链接并点击检查</div>
                 </div>
@@ -1711,6 +1463,90 @@ async function HTML(网站图标, 网络备案, img) {
             }
         }
         
+        function formatIpType(type) {
+            if (!type) return '<span class="ip-type-unknown">未知</span>';
+            
+            const typeMap = {
+                'isp': { text: '住宅', style: 'color: #36893dcc; font-weight: bold;' },
+                'hosting': { text: '机房', style: 'font-weight: bold;' },
+                'business': { text: '商用', style: 'color: #eab308; font-weight: bold;' }
+            };
+            
+            const typeInfo = typeMap[type.toLowerCase()];
+            if (!typeInfo) return '<span style="font-weight: bold;">' + type + '</span>';
+            return \`<span style="\${typeInfo.style}">\${typeInfo.text}</span>\`;
+        }
+        
+        function calculateAbuseScore(companyScore, asnScore, securityFlags = {}) {
+            // 如果两个分数都无效，返回null
+            if (!companyScore || companyScore === '未知') companyScore = 0;
+            if (!asnScore || asnScore === '未知') asnScore = 0;
+            
+            const company = parseFloat(companyScore) || 0;
+            const asn = parseFloat(asnScore) || 0;
+            
+            // 计算基础评分：(company + asn) / 2 * 5
+            let baseScore = ((company + asn) / 2) * 5;
+            
+            // 计算安全风险附加分
+            let riskAddition = 0;
+            
+            // 检查虚假IP (Bogon)，如果是则增加100%
+            if (securityFlags.is_bogon === true) {
+                riskAddition += 1.0; // 虚假IP增加100%
+            }
+            
+            // 其他风险项各增加15%
+            const otherRiskFlags = [
+                securityFlags.is_crawler,   // 爬虫
+                securityFlags.is_proxy,     // 代理服务器
+                securityFlags.is_vpn,       // VPN
+                securityFlags.is_tor,       // Tor 网络
+                securityFlags.is_abuser     // 滥用 IP
+            ];
+            
+            // 统计其他风险项中为 true 的数量
+            const otherRiskCount = otherRiskFlags.filter(flag => flag === true).length;
+            riskAddition += otherRiskCount * 0.15; // 每个风险项增加 15%
+            
+            // 最终评分 = 基础评分 + 风险附加分
+            const finalScore = baseScore + riskAddition;
+            
+            // 如果基础评分和风险附加分都是0，返回null
+            if (baseScore === 0 && riskAddition === 0) return null;
+            
+            return finalScore;
+        }
+        
+        function getAbuseScoreBadgeClass(percentage) {
+            if (percentage === null || percentage === undefined) return 'badge-info';
+            
+            if (percentage >= 100) return 'badge-critical';      // 危险红色 >= 100%
+            if (percentage >= 20) return 'badge-high';           // 橘黄色 15-99.99%
+            if (percentage >= 5) return 'badge-elevated';     // 黄色 5-14.99%
+            if (percentage >= 0.25) return 'badge-low';          // 淡绿色 0.25-4.99%
+            return 'badge-verylow';                              // 绿色 < 0.25%
+        }
+        
+        function getRiskLevelColor(riskLevel) {
+            // 根据风险等级返回对应的背景色
+            const colorMap = {
+                '极度危险': 'rgb(220, 38, 38)',      // 深红色
+                '高风险': 'rgb(239, 68, 68)',        // 红色
+                '轻微风险': 'rgb(249, 115, 22)',     // 橙色
+                '纯净': 'rgb(22, 163, 74)',        // 深绿色
+                '极度纯净':  'rgb(34, 197, 94)',        // 绿色
+            };
+            return colorMap[riskLevel] || 'rgb(100, 100, 100)';
+        }
+        
+        function formatAbuseScorePercentage(score) {
+            if (score === null || score === undefined) return '未知';
+            
+            const percentage = score * 100;
+            return percentage.toFixed(2) + '%';
+        }
+        
         function getAbusescoreColor(score) {
             // 提取数字部分并转换为百分比
             const match = score.match(/([0-9.]+)/);
@@ -1725,17 +1561,63 @@ async function HTML(网站图标, 网络备案, img) {
             return \`rgb(\${red}, \${green}, 0)\`;
         }
         
-        function formatInfoDisplay(data, containerId, showIPSelector = false) {
+        function formatInfoDisplay(data, containerId, showIPSelector = false, responseTime = null) {
             const container = document.getElementById(containerId);
+            
+            // 如果是出口信息，更新标题
+            if (containerId === 'exitInfo' && document.getElementById('exitInfoTitle')) {
+                const titleElement = document.getElementById('exitInfoTitle');
+                if (responseTime !== null && data && data.success) {
+                    // 将毫秒转换为秒，保留两位小数
+                    const seconds = (responseTime / 1000).toFixed(2);
+                    titleElement.textContent = \`出口信息(响应时间: \${seconds}秒)\`;
+                } else if (data && !data.success) {
+                    titleElement.textContent = '出口信息(代理不可用)';
+                } else if (data && data.error) {
+                    titleElement.textContent = '出口信息(代理不可用)';
+                } else {
+                    titleElement.textContent = '出口信息';
+                }
+            }
             
             if (!data || data.error) {
                 container.innerHTML = '<div class="error">数据获取失败，请稍后重试</div>';
                 return;
             }
             
-            const abusescoreColor = getAbusescoreColor(data.asn?.abuser_score || '0');
-            const abusescoreMatch = (data.asn?.abuser_score || '0').match(/([0-9.]+)/);
-            const abusescorePercentage = abusescoreMatch ? (parseFloat(abusescoreMatch[1]) * 1000).toFixed(2) + '%' : '0%';
+            // 计算综合滥用评分
+            const companyScore = data.company?.abuser_score;
+            const asnScore = data.asn?.abuser_score;
+            const securityFlags = {
+                is_crawler: data.is_crawler,
+                is_proxy: data.is_proxy,
+                is_vpn: data.is_vpn,
+                is_tor: data.is_tor,
+                is_abuser: data.is_abuser,
+                is_bogon: data.is_bogon
+            };
+            
+            const combinedScore = calculateAbuseScore(companyScore, asnScore, securityFlags);
+            let abuseScoreHTML = '';
+            
+            if (combinedScore !== null) {
+                const scorePercentage = combinedScore * 100;
+                const badgeClass = getAbuseScoreBadgeClass(scorePercentage);
+                const formattedScore = formatAbuseScorePercentage(combinedScore);
+                
+                // 根据百分比确定风险等级文本
+                let riskLevel = '';
+                if (scorePercentage >= 100) riskLevel = '极度危险';
+                else if (scorePercentage >= 20) riskLevel = '高风险';
+                else if (scorePercentage >= 5) riskLevel = '轻微风险';
+                else if (scorePercentage >= 0.25) riskLevel = '纯净';
+                else riskLevel = '极度纯净';
+                
+                const riskLevelColor = getRiskLevelColor(riskLevel);
+                abuseScoreHTML = \`<span style="background-color: \${riskLevelColor}; color: white; padding: 4px 8px; border-radius: 5px; font-size: 0.9em; font-weight: bold;">\${formattedScore} \${riskLevel}</span>\`;
+            } else {
+                abuseScoreHTML = '未知';
+            }
             
             const ipDisplay = showIPSelector && currentDomainInfo && currentDomainInfo.all_ips.length > 1 
                 ? \`<div class="ip-selector">
@@ -1759,18 +1641,22 @@ async function HTML(网站图标, 网络备案, img) {
                     </span>
                 </div>
                 <div class="info-item">
+                    <span class="info-label">运营商 / ASN 类型:</span>
+                    <span class="info-value">
+                        \${formatIpType(data.company?.type)} / \${formatIpType(data.asn?.type)}
+                    </span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">综合滥用评分:</span>
+                    <span class="info-value">
+                        \${abuseScoreHTML}
+                    </span>
+                </div>
+                <div class="info-item">
                     <span class="info-label">网络爬虫:</span>
                     <span class="info-value">
                         <span class="\${data.is_crawler ? 'status-yes' : 'status-no'}">
                             \${data.is_crawler ? '是' : '否'}
-                        </span>
-                    </span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">数据中心:</span>
-                    <span class="info-value">
-                        <span class="\${data.is_datacenter ? 'status-yes' : 'status-no'}">
-                            \${data.is_datacenter ? '是' : '否'}
                         </span>
                     </span>
                 </div>
@@ -1799,7 +1685,7 @@ async function HTML(网站图标, 网络备案, img) {
                     </span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">滥用行为:</span>
+                    <span class="info-label">滥用 IP:</span>
                     <span class="info-value">
                         <span class="\${data.is_abuser ? 'status-yes' : 'status-no'}">
                             \${data.is_abuser ? '是' : '否'}
@@ -1807,10 +1693,10 @@ async function HTML(网站图标, 网络备案, img) {
                     </span>
                 </div>
                 <div class="info-item">
-                    <span class="info-label">滥用风险评分:</span>
+                    <span class="info-label">虚假 IP:</span>
                     <span class="info-value">
-                        <span style="background-color: \${abusescoreColor}; color: white; padding: 4px 8px; border-radius: 5px; font-size: 0.9em;">
-                            \${abusescorePercentage}
+                        <span class="\${data.is_bogon ? 'status-yes' : 'status-no'}">
+                            \${data.is_bogon ? '是' : '否'}
                         </span>
                     </span>
                 </div>
@@ -1880,9 +1766,10 @@ async function HTML(网站图标, 网络备案, img) {
                 const proxyData = await proxyResponse.json();
                 
                 if (!proxyData.success) {
+                    document.getElementById('exitInfoTitle').textContent = '出口信息(代理不可用)';
                     exitInfo.innerHTML = '<div class="error">代理检测失败，请稍后重试</div>';
                 } else {
-                    formatInfoDisplay(proxyData, 'exitInfo', false);
+                    formatInfoDisplay(proxyData, 'exitInfo', false, proxyData.responseTime);
                 }
                 
             } catch (error) {
@@ -1934,6 +1821,8 @@ async function HTML(网站图标, 网络备案, img) {
             proxyInput.value = proxyUrl;
             
             checkBtn.disabled = true;
+            // 重置出口信息标题
+            document.getElementById('exitInfoTitle').textContent = '出口信息';
             entryInfo.innerHTML = '<div class="loading"><div class="spinner"></div>正在解析代理信息...</div>';
             exitInfo.innerHTML = '<div class="loading"><div class="spinner"></div>正在解析代理信息...</div>';
             
@@ -1998,17 +1887,20 @@ async function HTML(网站图标, 网络备案, img) {
                 if (exitPromise.status === 'fulfilled') {
                     const proxyData = exitPromise.value;
                     if (!proxyData.success) {
+                        document.getElementById('exitInfoTitle').textContent = '出口信息(代理不可用)';
                         exitInfo.innerHTML = \`<div class="error">代理检测失败: \${proxyData.error || '请检查代理链接'}</div>\`;
                     } else {
-                        formatInfoDisplay(proxyData, 'exitInfo', false);
+                        formatInfoDisplay(proxyData, 'exitInfo', false, proxyData.responseTime);
                     }
                 } else {
+                    document.getElementById('exitInfoTitle').textContent = '出口信息(代理不可用)';
                     exitInfo.innerHTML = '<div class="error">代理检测失败，请稍后重试</div>';
                 }
                 
             } catch (error) {
                 console.error('检测过程中出现错误:', error);
                 entryInfo.innerHTML = '<div class="error">检测失败，请稍后重试</div>';
+                document.getElementById('exitInfoTitle').textContent = '出口信息(代理不可用)';
                 exitInfo.innerHTML = '<div class="error">检测失败，请稍后重试</div>';
             } finally {
                 checkBtn.disabled = false;
