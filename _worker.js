@@ -1,7 +1,7 @@
 ﻿import { connect } from 'cloudflare:sockets';
 
 const CHECK_TIMEOUT_MS = 12000;
-const CONNECT_TIMEOUT_MS = 6000;
+const CONNECT_TIMEOUT_MS = 9999;
 const READ_TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 96 * 1024;
 const RESOLVE_BATCH_LIMIT = 50;
@@ -3039,30 +3039,21 @@ function generateHTML() {
 			{ key: 'https', label: 'HTTPS' }
 		];
 		const EXPORT_CSV_COLUMNS = [
-			{ header: 'IP', path: 'proxyIP' },
-			{ header: 'PORT', path: 'portRemote' },
-			{ header: 'IPV4_CONNECT_MS', path: 'probe_results.ipv4.connect_ms' },
-			{ header: 'IPV4_EXIT_IP', path: 'probe_results.ipv4.exit.ip' },
-			{ header: 'IPV4_EXIT_COLO', path: 'probe_results.ipv4.exit.colo' },
-			{ header: 'IPV4_EXIT_ASN', path: 'probe_results.ipv4.exit.asn' },
-			{ header: 'IPV4_EXIT_ORG', path: 'probe_results.ipv4.exit.asOrganization' },
-			{ header: 'IPV4_EXIT_CONTINENT', path: 'probe_results.ipv4.exit.continent' },
-			{ header: 'IPV4_EXIT_COUNTRY', path: 'probe_results.ipv4.exit.country' },
-			{ header: 'IPV4_EXIT_REGION', path: 'probe_results.ipv4.exit.region' },
-			{ header: 'IPV4_EXIT_CITY', path: 'probe_results.ipv4.exit.city' },
-			{ header: 'IPV4_EXIT_LONGITUDE', path: 'probe_results.ipv4.exit.longitude' },
-			{ header: 'IPV4_EXIT_LATITUDE', path: 'probe_results.ipv4.exit.latitude' },
-			{ header: 'IPV6_CONNECT_MS', path: 'probe_results.ipv6.connect_ms' },
-			{ header: 'IPV6_EXIT_IP', path: 'probe_results.ipv6.exit.ip' },
-			{ header: 'IPV6_EXIT_COLO', path: 'probe_results.ipv6.exit.colo' },
-			{ header: 'IPV6_EXIT_ASN', path: 'probe_results.ipv6.exit.asn' },
-			{ header: 'IPV6_EXIT_ORG', path: 'probe_results.ipv6.exit.asOrganization' },
-			{ header: 'IPV6_EXIT_CONTINENT', path: 'probe_results.ipv6.exit.continent' },
-			{ header: 'IPV6_EXIT_COUNTRY', path: 'probe_results.ipv6.exit.country' },
-			{ header: 'IPV6_EXIT_REGION', path: 'probe_results.ipv6.exit.region' },
-			{ header: 'IPV6_EXIT_CITY', path: 'probe_results.ipv6.exit.city' },
-			{ header: 'IPV6_EXIT_LONGITUDE', path: 'probe_results.ipv6.exit.longitude' },
-			{ header: 'IPV6_EXIT_LATITUDE', path: 'probe_results.ipv6.exit.latitude' }
+			{ header: 'TYPE', path: 'type' },
+			{ header: 'USERNAME', path: 'username' },
+			{ header: 'PASSWORD', path: 'password' },
+			{ header: 'HOSTNAME', path: 'hostname' },
+			{ header: 'PORT', path: 'port' },
+			{ header: 'CONNECT_MS', path: 'responseTime' },
+			{ header: 'EXIT_IP', path: 'exit.ip' },
+			{ header: 'EXIT_ASN', path: 'exit.asn' },
+			{ header: 'EXIT_ORG', path: 'exit.asOrganization' },
+			{ header: 'EXIT_CONTINENT', path: 'exit.continent' },
+			{ header: 'EXIT_COUNTRY', path: 'exit.country' },
+			{ header: 'EXIT_REGION', path: 'exit.region' },
+			{ header: 'EXIT_CITY', path: 'exit.city' },
+			{ header: 'EXIT_LONGITUDE', path: 'exit.longitude' },
+			{ header: 'EXIT_LATITUDE', path: 'exit.latitude' }
 		];
 		let resultRecords = [];
 		let activePrimaryFilter = 'all';
