@@ -46,12 +46,6 @@ export default {
 				return handleResolveBatchRequest(request, origin);
 			}
 
-			if (url.pathname.toLowerCase() === '/locations') {
-				return fetch(new Request('https://speed.cloudflare.com/locations', {
-					headers: { 'Referer': 'https://speed.cloudflare.com/' }
-				}));
-			}
-
 			if (url.pathname.toLowerCase().startsWith('/check')) {
 				const checkParams = parseCheckRequest(url);
 				if (!checkParams) {
@@ -2292,6 +2286,36 @@ function generateHTML() {
 			color: #081826;
 		}
 
+		.red-location-marker {
+			background: transparent;
+			border: 0;
+		}
+
+		.red-location-pin {
+			position: absolute;
+			left: 50%;
+			top: 0;
+			width: 28px;
+			height: 28px;
+			border: 2px solid #ffffff;
+			border-radius: 50% 50% 50% 0;
+			background: #ef4444;
+			box-shadow: 0 10px 24px rgba(127, 29, 29, 0.34);
+			transform: translateX(-50%) rotate(-45deg);
+		}
+
+		.red-location-pin::after {
+			content: '';
+			position: absolute;
+			width: 9px;
+			height: 9px;
+			left: 50%;
+			top: 50%;
+			border-radius: 999px;
+			background: #ffffff;
+			transform: translate(-50%, -50%);
+		}
+
 		.leaflet-control-zoom {
 			display: none !important;
 		}
@@ -2818,7 +2842,7 @@ function generateHTML() {
 					<div class="input-zone">
 						<label class="field-label" for="inputList">代理链接 / 域名代理</label>
 						<div class="input-wrapper" id="inputContainer">
-							<input class="input-control" type="text" id="inputList" placeholder="例如：socks5://user:pass@proxy.example.com:1080 或 8.223.63.150:1080">
+							<input class="input-control" type="text" id="inputList" placeholder="例如：socks5://user:pass@proxy.example.com:1080">
 							<button class="history-toggle" type="button" id="historyBtn" aria-label="查看历史记录">
 								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 									<circle cx="12" cy="12" r="10"></circle>
@@ -2995,9 +3019,7 @@ function generateHTML() {
 
 		let map = null;
 		let mapLayers = [];
-		let mapSvgRenderer = null;
-		let cfLocationIndex = new Map();
-		let cfLocationsPromise = null;
+		let redLocationIcon = null;
 		let mapRenderToken = 0;
 		let totalTargets = 0;
 		let completedCount = 0;
@@ -3127,8 +3149,19 @@ function generateHTML() {
 			map.attributionControl.setPrefix(false);
 			// OpenStreetMap provides broader global coverage than AMap for international checks.
 			L.tileLayer(BASE_MAP_TILE_URL, BASE_MAP_TILE_OPTIONS).addTo(map);
-			mapSvgRenderer = L.svg();
-			mapSvgRenderer.addTo(map);
+		}
+
+		function getRedLocationIcon() {
+			if (!redLocationIcon) {
+				redLocationIcon = L.divIcon({
+					className: 'red-location-marker',
+					html: '<span class="red-location-pin" aria-hidden="true"></span>',
+					iconSize: [32, 40],
+					iconAnchor: [16, 38],
+					popupAnchor: [0, -34]
+				});
+			}
+			return redLocationIcon;
 		}
 
 		function normalizeColoCode(value) {
@@ -3162,123 +3195,11 @@ function generateHTML() {
 			return null;
 		}
 
-		async function loadCfLocations() {
-			if (cfLocationsPromise) {
-				return cfLocationsPromise;
-			}
-
-			cfLocationsPromise = fetch('/locations')
-				.then(function (response) {
-					if (!response.ok) {
-						throw new Error('Failed to load /locations: ' + response.status);
-					}
-					return response.json();
-				})
-				.then(function (payload) {
-					const nextIndex = new Map();
-					if (Array.isArray(payload)) {
-						payload.forEach(function (entry) {
-							const code = normalizeColoCode(entry?.iata);
-							const lat = Number(entry?.lat);
-							const lon = Number(entry?.lon);
-							if (!code || !Number.isFinite(lat) || !Number.isFinite(lon)) {
-								return;
-							}
-							nextIndex.set(code, {
-								code: code,
-								lat: lat,
-								lon: lon,
-								city: String(entry?.city || '').trim(),
-								region: String(entry?.region || '').trim(),
-								country: String(entry?.cca2 || '').trim()
-							});
-						});
-					}
-					cfLocationIndex = nextIndex;
-					return nextIndex;
-				})
-				.catch(function (error) {
-					console.error('Failed to preload Cloudflare locations', error);
-					return cfLocationIndex;
-				});
-
-			return cfLocationsPromise;
-		}
-
-		function getCfLocation(coloCode) {
-			const normalizedCode = normalizeColoCode(coloCode);
-			if (!normalizedCode) {
-				return null;
-			}
-
-			const location = cfLocationIndex.get(normalizedCode);
-			return location ? {
-				code: location.code,
-				lat: location.lat,
-				lon: location.lon,
-				city: location.city,
-				region: location.region,
-				country: location.country
-			} : null;
-		}
-
 		function clearMapLayers() {
 			mapLayers.forEach(function (layer) {
 				map.removeLayer(layer);
 			});
 			mapLayers = [];
-		}
-
-		function buildCfLocationLabel(cfLocation) {
-			return [cfLocation?.city, cfLocation?.region, cfLocation?.country].filter(Boolean).join(', ');
-		}
-
-		function ensureRouteArrowMarkerDef() {
-			const overlaySvg = map?.getPanes?.().overlayPane?.querySelector('svg');
-			if (!overlaySvg) {
-				return '';
-			}
-
-			const svgNamespace = 'http://www.w3.org/2000/svg';
-			let defs = overlaySvg.querySelector('defs');
-			if (!defs) {
-				defs = document.createElementNS(svgNamespace, 'defs');
-				overlaySvg.insertBefore(defs, overlaySvg.firstChild);
-			}
-
-			const markerId = 'route-flow-arrowhead';
-			if (!overlaySvg.querySelector('#' + markerId)) {
-				const marker = document.createElementNS(svgNamespace, 'marker');
-				marker.setAttribute('id', markerId);
-				marker.setAttribute('viewBox', '0 0 10 10');
-				marker.setAttribute('refX', '8');
-				marker.setAttribute('refY', '5');
-				marker.setAttribute('markerWidth', '7');
-				marker.setAttribute('markerHeight', '7');
-				marker.setAttribute('orient', 'auto');
-				marker.setAttribute('markerUnits', 'strokeWidth');
-
-				const arrowPath = document.createElementNS(svgNamespace, 'path');
-				arrowPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
-				arrowPath.setAttribute('fill', '#8be9ff');
-				arrowPath.setAttribute('fill-opacity', '0.95');
-
-				marker.appendChild(arrowPath);
-				defs.appendChild(marker);
-			}
-
-			return markerId;
-		}
-
-		function applyArrowStyleToPolyline(polyline) {
-			const markerId = ensureRouteArrowMarkerDef();
-			const pathElement = polyline?.getElement?.();
-			if (!markerId || !pathElement) {
-				return;
-			}
-
-			pathElement.setAttribute('marker-end', 'url(#' + markerId + ')');
-			pathElement.setAttribute('stroke-linecap', 'round');
 		}
 
 		function createExitPopup(exitData) {
@@ -3291,14 +3212,6 @@ function generateHTML() {
 				+ '<br>' + escapeHtml(locationText)
 				+ '<br>' + escapeHtml(networkText)
 				+ coloText
-				+ '</div>';
-		}
-
-		function createCfPopup(cfLocation) {
-			const locationText = buildCfLocationLabel(cfLocation) || 'Location unknown';
-			return '<div class="map-popup"><b>Cloudflare Colo</b><br>'
-				+ escapeHtml(cfLocation?.code || 'Unknown')
-				+ '<br>' + escapeHtml(locationText)
 				+ '</div>';
 		}
 
@@ -3319,7 +3232,6 @@ function generateHTML() {
 				prep: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><path d="M12 8v4l3 2"></path></svg>',
 				location: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21s6-4.35 6-10a6 6 0 1 0-12 0c0 5.65 6 10 6 10z"></path><circle cx="12" cy="11" r="2.5"></circle></svg>',
 				network: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><circle cx="7" cy="7" r="1"></circle><circle cx="7" cy="17" r="1"></circle><path d="M12 10v4"></path></svg>',
-				exits: '<svg viewBox="0 0 44 43" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M30.251 8.73438C30.251 6.13691 32.4057 4.03125 35.0635 4.03125C37.7214 4.03125 39.876 6.13691 39.876 8.73438C39.876 10.8649 38.4264 12.6646 36.4385 13.2427V15.4531C36.4385 19.1638 33.3605 22.1719 29.5635 22.1719H15.8135C13.5354 22.1719 11.6885 23.9767 11.6885 26.2031V29.7573C13.6764 30.3354 15.126 32.1351 15.126 34.2656C15.126 36.8631 12.9714 38.9688 10.3135 38.9688C7.65566 38.9688 5.50101 36.8631 5.50101 34.2656C5.50101 32.1351 6.95063 30.3354 8.93853 29.7573V13.2427C6.95063 12.6646 5.50101 10.8649 5.50101 8.73438C5.50101 6.13691 7.65566 4.03125 10.3135 4.03125C12.9714 4.03125 15.126 6.13691 15.126 8.73438C15.126 10.8649 13.6764 12.6646 11.6885 13.2427V20.8277C12.8376 19.9842 14.2658 19.4844 15.8135 19.4844H29.5635C31.8417 19.4844 33.6885 17.6795 33.6885 15.4531V13.2427C31.7006 12.6646 30.251 10.8649 30.251 8.73438Z" fill="currentColor"></path></svg>',
 				error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="m15 9-6 6"></path><path d="m9 9 6 6"></path></svg>',
 				info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 10v5"></path><circle cx="12" cy="7" r="1"></circle></svg>',
 				retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 5v6h-6"></path><path d="M4 19v-6h6"></path><path d="M7 17a7 7 0 0 0 11-4"></path><path d="M17 7A7 7 0 0 0 6 11"></path></svg>'
@@ -4738,12 +4650,11 @@ function generateHTML() {
 					itemObj.info.innerHTML =
 						'<span class="result-label">候选目标</span>' +
 						buildCopyableTarget(data.link || target) +
-						'<span class="result-detail">代理验证通过，可继续查看出口位置、网络信息和地图分布。</span>';
+						'<span class="result-detail">代理验证通过，可继续查看出口位置和网络信息。</span>';
 
 					const metaParts = [
 						buildMetaChip(locations, 'location'),
-						buildMetaChip(networks, 'network'),
-						buildMetaChip(exitIps.length + '个出口', 'exits')
+						buildMetaChip(networks, 'network')
 					];
 					itemObj.meta.innerHTML = metaParts.join('');
 
@@ -4784,7 +4695,7 @@ function generateHTML() {
 			updateResultFilters();
 		}
 
-		async function showDetails(button, exitData) {
+		function showDetails(button, exitData) {
 			const item = button.closest('.result-item');
 			const container = item.querySelector('.map-container-wrapper');
 			const isOpen = container.style.display === 'block';
@@ -4822,66 +4733,18 @@ function generateHTML() {
 				map.invalidateSize();
 
 				const exitLocation = parseCoordinatePair(exitData?.loc);
-				await loadCfLocations();
-				if (currentToken !== mapRenderToken || container.style.display !== 'block') {
-					return;
-				}
-
-				const cfLocation = getCfLocation(exitData?.colo);
-				const cfCoordinates = cfLocation ? [cfLocation.lat, cfLocation.lon] : null;
 				const hasExitLocation = isValidCoordinatePair(exitLocation);
-				const hasCfLocation = isValidCoordinatePair(cfCoordinates);
 
 				clearMapLayers();
 
 				if (hasExitLocation) {
-					const exitMarker = L.circleMarker(exitLocation, {
-						radius: 8,
-						weight: 2,
-						color: '#34d399',
-						fillColor: '#34d399',
-						fillOpacity: 0.3
+					const exitMarker = L.marker(exitLocation, {
+						icon: getRedLocationIcon(),
+						title: exitData?.ip || 'Exit IP'
 					}).addTo(map);
 					exitMarker.bindPopup(createExitPopup(exitData));
 					mapLayers.push(exitMarker);
-				}
-
-				if (hasCfLocation) {
-					const cfMarker = L.circleMarker(cfCoordinates, {
-						radius: 8,
-						weight: 2,
-						color: '#61dbff',
-						fillColor: '#61dbff',
-						fillOpacity: 0.28
-					}).addTo(map);
-					cfMarker.bindPopup(createCfPopup(cfLocation));
-					mapLayers.push(cfMarker);
-				}
-
-				if (hasExitLocation && hasCfLocation) {
-					const transitLine = L.polyline([exitLocation, cfCoordinates], {
-						color: '#8be9ff',
-						weight: 2,
-						opacity: 0.85,
-						dashArray: '8 6',
-						renderer: mapSvgRenderer
-					}).addTo(map);
-					mapLayers.push(transitLine);
-					applyArrowStyleToPolyline(transitLine);
-					map.fitBounds([exitLocation, cfCoordinates], {
-						padding: [36, 36],
-						maxZoom: 6
-					});
-					return;
-				}
-
-				if (hasExitLocation) {
 					map.setView(exitLocation, 6);
-					return;
-				}
-
-				if (hasCfLocation) {
-					map.setView(cfCoordinates, 5);
 					return;
 				}
 
@@ -5062,7 +4925,6 @@ function generateHTML() {
 			bindInputShortcut();
 			renderDashboard();
 			updateResultFilters();
-			loadCfLocations();
 			fetchVisitCount();
 
 			const path = window.location.pathname.slice(1);
