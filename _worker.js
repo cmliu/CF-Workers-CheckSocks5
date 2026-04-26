@@ -5305,7 +5305,7 @@ function generateHTML(备案内容) {
 		}
 
 		function formatExitLocation(exitData) {
-			const country = String(firstNonEmpty(exitData?.countryName, exitData?.location?.country, exitData?.country) || '').trim();
+			const country = String(firstNonEmpty(exitData?.country, exitData?.countryCode, exitData?.country_code, exitData?.countryName, exitData?.location?.country) || '').trim();
 			const city = String(firstNonEmpty(exitData?.city, exitData?.location?.city) || '').trim();
 			return [country, city].filter(Boolean).join(' · ');
 		}
