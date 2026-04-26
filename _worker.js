@@ -17,6 +17,7 @@ const decoder = new TextDecoder();
 
 export default {
 	async fetch(request, env, ctx) {
+		const 备案内容 = env.BEIAN || '© 2025 - 2026 Check Socks5 · 基于 <a href="https://github.com/cmliu/CF-Workers-CheckSocks5" target="_blank" rel="noreferrer">Cloudflare Workers 构建与运行</a> · 今日访问人数：<span id="visit-count">···</span> · 站点维护：<a href="https://t.me/CMLiussss" target="_blank" rel="noreferrer">CMLiussss</a>';
 		const url = new URL(fixRequestUrl(request.url));
 		const origin = request.headers.get('Origin') || '';
 
@@ -58,7 +59,7 @@ export default {
 				return jsonResponse(result, { origin });
 			}
 
-			return new Response(generateHTML(), {
+			return new Response(generateHTML(备案内容), {
 				headers: {
 					'Content-Type': 'text/html; charset=UTF-8',
 					'Cache-Control': 'no-cache, no-store, must-revalidate'
@@ -894,7 +895,7 @@ async function dohQuery(name, type, endpoint = 'https://cloudflare-dns.com/dns-q
 	}
 }
 
-function generateHTML() {
+function generateHTML(备案内容) {
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -3224,7 +3225,7 @@ function generateHTML() {
 		</main>
 
 		<footer class="site-footer">
-			<div>© 2025 - 2026 Check Socks5 · 基于 <a href="https://github.com/cmliu/CF-Workers-CheckSocks5" target="_blank" rel="noreferrer">Cloudflare Workers 构建与运行</a> · 今日访问人数：<span id="visit-count">···</span> · 站点维护：<a href="https://t.me/CMLiussss" target="_blank" rel="noreferrer">CMLiussss</a></div>
+			<div>${备案内容}</div>
 		</footer>
 	</div>
 
