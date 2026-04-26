@@ -4990,6 +4990,23 @@ function generateHTML(备案内容) {
 			return type + '://' + exportHost + ':' + portRemote;
 		}
 
+		function buildTextExportTypeTag(exitData) {
+			const typeParts = [
+				exitData?.company?.type,
+				exitData?.asnInfo?.type
+			].map(function (type) {
+				return normalizeExportValue(formatExitIpType(type));
+			}).filter(function (type) {
+				return type && type !== '未知';
+			});
+			return typeParts.length ? '[' + typeParts.join('/') + ']' : '';
+		}
+
+		function buildTextExportRiskTag(exitData) {
+			const riskText = normalizeExportValue(formatExitRiskText(exitData));
+			return riskText && riskText !== '未知' ? '[' + riskText + ']' : '';
+		}
+
 		function buildTextExportLine(data) {
 			const exportTarget = getTextExportTarget(data);
 			if (!exportTarget) return '';
@@ -4999,7 +5016,9 @@ function generateHTML(备案内容) {
 			const city = normalizeExportValue(exitData.city);
 			const asn = normalizeExportValue(exitData.asn);
 			const asOrganization = normalizeExportValue(exitData.asOrganization);
-			const description = [country, city, asn ? 'AS' + asn : '', asOrganization].filter(Boolean).join(' ');
+			const locationSegment = [country, city].filter(Boolean).join(' ') + buildTextExportTypeTag(exitData);
+			const networkSegment = [asn ? 'AS' + asn : '', asOrganization].filter(Boolean).join(' ') + buildTextExportRiskTag(exitData);
+			const description = [locationSegment, networkSegment].filter(Boolean).join(' ');
 			return exportTarget + (description ? '#' + description : '');
 		}
 
@@ -5286,7 +5305,7 @@ function generateHTML(备案内容) {
 		}
 
 		function formatExitLocation(exitData) {
-			const country = String(firstNonEmpty(exitData?.countryName, exitData?.location?.country, exitData?.country) || '').trim();
+			const country = String(firstNonEmpty(exitData?.country, exitData?.countryCode, exitData?.country_code, exitData?.countryName, exitData?.location?.country) || '').trim();
 			const city = String(firstNonEmpty(exitData?.city, exitData?.location?.city) || '').trim();
 			return [country, city].filter(Boolean).join(' · ');
 		}
