@@ -2,14 +2,15 @@
 
 ![demo](./demo.png)
 
-一个基于 Cloudflare Workers 的代理可用性检测工具。项目以单个 `_worker.js` 运行为核心，支持 SOCKS5、HTTP、HTTPS 代理检测，提供网页端单条/批量检测、域名解析、出口 IP 信息展示、地图定位、结果筛选与导出。
+一个基于 Cloudflare Workers 的代理可用性检测工具。项目以单个 `_worker.js` 运行为核心，支持 SOCKS5、HTTP、HTTPS、TURN 代理检测，提供网页端单条/批量检测、域名解析、出口 IP 信息展示、地图定位、结果筛选与导出。
 
 > 当前源码没有内置 `TOKEN` 鉴权。部署到公开域名后，任何访问者都可以使用检测接口；如果需要私有使用，请在 Cloudflare 侧增加访问控制或自行扩展鉴权逻辑。
 
 ## 功能特性
 
-- 支持 `socks5://`、`http://`、`https://` 三类代理协议。
+- 支持 `socks5://`、`http://`、`https://`、`turn://` 四类代理协议。
 - 支持无认证代理、`username:password` 认证代理，以及 IPv4、域名、方括号 IPv6 地址。
+- TURN 检测使用 TCP Allocation / CONNECT / ConnectionBind 流程，支持无认证 TURN 服务器和长期凭据认证。
 - 支持单条检测和批量检测；批量模式会自动去重、解析域名并并发验证。
 - 支持域名解析为 A / AAAA 记录，优先使用 Cloudflare DoH，失败后回退到 Google DoH。
 - 支持代理出口信息展示，包括出口 IP、地区、ASN、运营商、风险标签、响应耗时等。
@@ -53,6 +54,8 @@ http://host:80
 http://username:password@host:80
 https://host:443
 https://username:password@host:443
+turn://host:3478
+turn://username:password@host:3478
 socks5://username:password@[2001:db8::1]:1080
 ```
 
@@ -63,6 +66,18 @@ socks5://username:password@[2001:db8::1]:1080
 | `socks5` | `1080` |
 | `http` | `80` |
 | `https` | `443` |
+| `turn` | `3478` |
+
+### TURN 支持说明
+
+`turn://` 目标会被当作 TURN over TCP 服务器检测。Worker 会先连接 TURN 服务器，再通过 TURN TCP 中继访问 `api.ipapi.is:443`，最后读取出口 IP 信息。
+
+当前 TURN 实现有以下边界：
+
+- 支持 RFC 6062 风格的 TCP Allocation、CreatePermission、CONNECT 和 ConnectionBind。
+- 支持无认证服务器；如果服务端返回 `401` 认证挑战，并且链接中提供了 `username:password`，会使用长期凭据认证继续握手。
+- 目标出口检测地址会解析为 IPv4 后发起 TURN CONNECT；当前不走 TURN UDP relay，也不支持 `turns://`。
+- `turn://` 中的主机可以是 IP 或域名，端口未填写时默认使用 `3478`。
 
 ## API
 
@@ -79,6 +94,8 @@ socks5://username:password@[2001:db8::1]:1080
 /check?socks5=proxy.example.com:1080
 /check?http=proxy.example.com:80
 /check?https=proxy.example.com:443
+/check?turn=turn.example.com:3478
+/check?proxy=turn://user:pass@turn.example.com:3478
 /check/proxy=socks5://proxy.example.com:1080
 ```
 
@@ -148,8 +165,6 @@ curl "https://your-worker.example.workers.dev/resolve?proxyip=socks5://proxy.exa
 - 输入已经是 IPv4 或 IPv6 时，直接返回原目标和端口。
 - 输入是域名时，解析 A / AAAA 记录。
 - 未提供端口时，解析接口默认使用 `443`。
-- 域名包含 `.tp端口.` 时，会从域名中提取端口，例如 `node.tp8443.example.com` 使用 `8443`。
-- 域名包含 `.william.` 时，会优先读取 TXT 记录，并把逗号分隔的 TXT 内容作为目标列表。
 
 ### `POST /resolve-batch`
 
@@ -212,6 +227,7 @@ https://your-worker.example.workers.dev/socks5://proxy.example.com:1080
 
 - Cloudflare Workers 的 TCP Socket 能力由 `cloudflare:sockets` 提供，请确保部署环境支持 Workers TCP 出站连接。
 - 检测逻辑会把代理作为隧道访问 `api.ipapi.is`，因此结果反映的是该代理访问该目标服务时的可用性和出口信息。
+- TURN 检测依赖 TURN 服务器支持 TCP relay / CONNECT；只支持 UDP relay 的 TURN 服务会检测失败。
 - 公开部署时请谨慎使用真实代理账号密码；当前页面和接口没有访问令牌保护。
 - 大批量检测可能受到 Cloudflare Workers 执行时长、并发和外部 DNS/API 可用性的影响。
 
