@@ -5,11 +5,12 @@ const CONNECT_TIMEOUT_MS = 9999;
 const READ_TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 96 * 1024;
 const RESOLVE_BATCH_LIMIT = 50;
-const PROXY_TYPES = ['socks5', 'http', 'https'];
+const PROXY_TYPES = ['socks5', 'http', 'https', 'turn'];
 const DEFAULT_PORTS = {
 	socks5: 1080,
 	http: 80,
-	https: 443
+	https: 443,
+	turn: 3478
 };
 
 const encoder = new TextEncoder();
@@ -80,10 +81,10 @@ export default {
 				if (!checkParams) {
 					return jsonResponse({
 						success: false,
-						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port or /check?proxy=socks5://host:port'
+						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port, /check?turn=host:port or /check?proxy=socks5://host:port'
 					}, { status: 400, origin });
 				}
-				const result = await checkProxy(checkParams, url);
+				const result = await checkProxy(checkParams);
 				return jsonResponse(result, { origin });
 			}
 
@@ -167,7 +168,7 @@ function parseCheckRequest(url) {
 	}
 
 	const tail = decodeURIComponent(url.pathname.slice('/check'.length).replace(/^\/+/, ''));
-	const pathMatch = tail.match(/^(socks5|http|https|proxy)=(.+)$/i);
+	const pathMatch = tail.match(/^(socks5|http|https|turn|proxy)=(.+)$/i);
 	if (pathMatch) {
 		const key = pathMatch[1].toLowerCase();
 		const value = pathMatch[2];
@@ -181,7 +182,7 @@ function parseCheckRequest(url) {
 	return null;
 }
 
-async function checkProxy({ type, value }, requestUrl) {
+async function checkProxy({ type, value }) {
 	const startedAt = Date.now();
 	let proxy;
 
@@ -199,15 +200,12 @@ async function checkProxy({ type, value }, requestUrl) {
 	}
 
 	let tunnel = null;
-	const targetHost = 'api.ipapi.is'; //requestUrl.hostname;
-	const targetSecure = requestUrl.protocol !== 'http:';
-	const targetPort = targetSecure ? 443 : 80;
+	const targetHost = 'api.ipapi.is';
+	const targetPort = 443;
 
 	try {
 		tunnel = await withTimeout(openProxyTunnel(proxy, targetHost, targetPort), CHECK_TIMEOUT_MS, 'Proxy connection timed out');
-		const exit = targetSecure
-			? await requestIpJsonOverTlsTunnel(tunnel, targetHost)
-			: await requestIpJsonOverPlainTunnel(tunnel, targetHost);
+		const exit = await requestIpJsonOverTlsTunnel(tunnel, targetHost);
 
 		return buildCheckResult({
 			type,
@@ -256,6 +254,7 @@ async function openProxyTunnel(proxy, targetHost, targetPort) {
 		if (isIPHostname(proxy.hostname)) return httpsConnect(proxy, targetHost, targetPort);
 		return httpConnect(proxy, targetHost, targetPort, true);
 	}
+	if (proxy.type === 'turn') return turnConnect(proxy, targetHost, targetPort);
 	throw new Error(`Unsupported proxy type: ${proxy.type}`);
 }
 
@@ -388,6 +387,364 @@ function indexOfHeaderEnd(buffer) {
 		if (buffer[i] === 0x0d && buffer[i + 1] === 0x0a && buffer[i + 2] === 0x0d && buffer[i + 3] === 0x0a) return i + 4;
 	}
 	return -1;
+}
+
+const TURN_STUN_MAGIC_COOKIE = new Uint8Array([0x21, 0x12, 0xa4, 0x42]);
+const TURN_STUN_TYPE = {
+	ALLOCATE_REQUEST: 0x0003,
+	ALLOCATE_SUCCESS: 0x0103,
+	ALLOCATE_ERROR: 0x0113,
+	CREATE_PERMISSION_REQUEST: 0x0008,
+	CREATE_PERMISSION_SUCCESS: 0x0108,
+	CONNECT_REQUEST: 0x000a,
+	CONNECT_SUCCESS: 0x010a,
+	CONNECTION_BIND_REQUEST: 0x000b,
+	CONNECTION_BIND_SUCCESS: 0x010b
+};
+const TURN_STUN_ATTR = {
+	USERNAME: 0x0006,
+	MESSAGE_INTEGRITY: 0x0008,
+	ERROR_CODE: 0x0009,
+	XOR_PEER_ADDRESS: 0x0012,
+	REALM: 0x0014,
+	NONCE: 0x0015,
+	REQUESTED_TRANSPORT: 0x0019,
+	CONNECTION_ID: 0x002a
+};
+
+function turnStunPadding(length) {
+	return -length & 3;
+}
+
+function readUint16BE(bytes, offset = 0) {
+	return (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function createTurnStunAttribute(type, value) {
+	const body = 数据转Uint8Array(value);
+	const attribute = new Uint8Array(4 + body.byteLength + turnStunPadding(body.byteLength));
+	const view = new DataView(attribute.buffer);
+	view.setUint16(0, type);
+	view.setUint16(2, body.byteLength);
+	attribute.set(body, 4);
+	return attribute;
+}
+
+function createTurnStunMessage(type, transactionId, attributes) {
+	const body = concatUint8(...attributes);
+	const header = new Uint8Array(20);
+	const view = new DataView(header.buffer);
+	view.setUint16(0, type);
+	view.setUint16(2, body.byteLength);
+	header.set(TURN_STUN_MAGIC_COOKIE, 4);
+	header.set(transactionId, 8);
+	return concatUint8(header, body);
+}
+
+function createTurnXorPeerAddress(ip, port) {
+	if (!isIPv4(ip)) throw new Error('TURN CONNECT currently requires an IPv4 target address');
+	const address = new Uint8Array(8);
+	address[1] = 1;
+	new DataView(address.buffer).setUint16(2, port ^ 0x2112);
+	ip.split('.').forEach((value, index) => {
+		address[4 + index] = Number(value) ^ TURN_STUN_MAGIC_COOKIE[index];
+	});
+	return address;
+}
+
+/** @typedef {{ type: number, attributes: Record<number, Uint8Array> }} TurnStunMessage */
+
+/** @returns {TurnStunMessage | null} */
+function parseTurnStunMessage(data) {
+	const buffer = 数据转Uint8Array(data);
+	if (buffer.byteLength < 20 || TURN_STUN_MAGIC_COOKIE.some((value, index) => buffer[4 + index] !== value)) return null;
+
+	const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+	const messageLength = view.getUint16(2);
+	/** @type {Record<number, Uint8Array>} */
+	const attributes = {};
+
+	for (let offset = 20; offset + 4 <= 20 + messageLength;) {
+		const type = view.getUint16(offset);
+		const length = view.getUint16(offset + 2);
+		if (offset + 4 + length > buffer.byteLength) break;
+
+		attributes[type] = buffer.slice(offset + 4, offset + 4 + length);
+		offset += 4 + length + turnStunPadding(length);
+	}
+
+	return {
+		type: view.getUint16(0),
+		attributes
+	};
+}
+
+function parseTurnErrorCode(data) {
+	return data?.byteLength >= 4 ? (data[2] & 7) * 100 + data[3] : 0;
+}
+
+function randomTurnTransactionId() {
+	return crypto.getRandomValues(new Uint8Array(12));
+}
+
+async function addTurnMessageIntegrity(message, key) {
+	const signedMessage = new Uint8Array(message);
+	const view = new DataView(signedMessage.buffer);
+	view.setUint16(2, view.getUint16(2) + 24);
+
+	const hmacKey = await crypto.subtle.importKey(
+		'raw',
+		key,
+		{ name: 'HMAC', hash: 'SHA-1' },
+		false,
+		['sign']
+	);
+	const signature = await crypto.subtle.sign('HMAC', hmacKey, signedMessage);
+	return concatUint8(
+		signedMessage,
+		createTurnStunAttribute(TURN_STUN_ATTR.MESSAGE_INTEGRITY, new Uint8Array(signature))
+	);
+}
+
+/** @returns {Promise<{ message: TurnStunMessage, extraData: Uint8Array | null }>} */
+async function readTurnStunMessage(reader, bufferedData = null, timeoutMessage = 'TURN response timed out') {
+	let buffer = 有效数据长度(bufferedData) ? 数据转Uint8Array(bufferedData) : new Uint8Array(0);
+	const pull = async () => {
+		const { done, value } = await withTimeout(reader.read(), CONNECT_TIMEOUT_MS, timeoutMessage);
+		if (done) throw new Error('TURN server closed connection');
+		if (value?.byteLength) buffer = concatUint8(buffer, value);
+	};
+
+	while (buffer.byteLength < 20) await pull();
+
+	const messageLength = 20 + readUint16BE(buffer, 2);
+	if (messageLength > 65555) throw new Error('TURN response is too large');
+	while (buffer.byteLength < messageLength) await pull();
+
+	const message = parseTurnStunMessage(buffer.subarray(0, messageLength));
+	if (!message) throw new Error('Invalid TURN/STUN response');
+
+	return {
+		message,
+		extraData: buffer.byteLength > messageLength ? buffer.subarray(messageLength) : null
+	};
+}
+
+async function resolveTurnTargetIPv4(hostname) {
+	const host = stripIPv6Brackets(hostname);
+	if (isIPv4(host)) return host;
+
+	const records = await dohQuery(host, 'A');
+	const record = records.find(item => item.type === 1 && isIPv4(item.data));
+	return record?.data || null;
+}
+
+async function createTurnLongTermCredentialKey(value) {
+	return new Uint8Array(await crypto.subtle.digest('MD5', encoder.encode(value)));
+}
+
+async function writeTurnBytes(writer, bytes, timeoutMessage) {
+	await withTimeout(writer.write(bytes), CONNECT_TIMEOUT_MS, timeoutMessage);
+}
+
+async function allocateTurnRelay(writer, reader, transport, credentials, pipeline) {
+	const requestedTransport = new Uint8Array([transport, 0, 0, 0]);
+	await writeTurnBytes(writer, createTurnStunMessage(
+		TURN_STUN_TYPE.ALLOCATE_REQUEST,
+		randomTurnTransactionId(),
+		[createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT, requestedTransport)]
+	), 'TURN Allocate request timed out');
+
+	let turnResponse = await readTurnStunMessage(reader, null, 'TURN Allocate response timed out');
+	let message = turnResponse.message;
+	let extraData = turnResponse.extraData;
+	let integrityKey = null;
+	let authAttributes = [];
+	const sign = messageToSign => (
+		integrityKey ? addTurnMessageIntegrity(messageToSign, integrityKey) : Promise.resolve(messageToSign)
+	);
+
+	if (
+		message.type === TURN_STUN_TYPE.ALLOCATE_ERROR
+		&& credentials.username !== null
+		&& credentials.password !== null
+		&& parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE]) === 401
+	) {
+		const realmBytes = message.attributes[TURN_STUN_ATTR.REALM];
+		const nonce = message.attributes[TURN_STUN_ATTR.NONCE];
+		if (!realmBytes?.byteLength || !nonce?.byteLength) throw new Error('TURN authentication challenge is missing realm or nonce');
+
+		const realm = decoder.decode(realmBytes);
+		integrityKey = await createTurnLongTermCredentialKey(`${credentials.username}:${realm}:${credentials.password}`);
+		authAttributes = [
+			createTurnStunAttribute(TURN_STUN_ATTR.USERNAME, encoder.encode(credentials.username)),
+			createTurnStunAttribute(TURN_STUN_ATTR.REALM, encoder.encode(realm)),
+			createTurnStunAttribute(TURN_STUN_ATTR.NONCE, nonce)
+		];
+
+		const allocateRequest = await addTurnMessageIntegrity(createTurnStunMessage(
+			TURN_STUN_TYPE.ALLOCATE_REQUEST,
+			randomTurnTransactionId(),
+			[
+				createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT, requestedTransport),
+				...authAttributes
+			]
+		), integrityKey);
+
+		const pipelinedMessages = pipeline ? await Promise.all(pipeline(authAttributes, sign)) : [];
+		await writeTurnBytes(
+			writer,
+			pipelinedMessages.length ? concatUint8(allocateRequest, ...pipelinedMessages) : allocateRequest,
+			'TURN authenticated Allocate request timed out'
+		);
+
+		turnResponse = await readTurnStunMessage(reader, extraData, 'TURN authenticated Allocate response timed out');
+		message = turnResponse.message;
+		extraData = turnResponse.extraData;
+	} else if (pipeline && message.type === TURN_STUN_TYPE.ALLOCATE_SUCCESS) {
+		const pipelinedMessages = await Promise.all(pipeline(authAttributes, sign));
+		if (pipelinedMessages.length) {
+			await writeTurnBytes(writer, concatUint8(...pipelinedMessages), 'TURN pipelined request timed out');
+		}
+	}
+
+	if (message.type !== TURN_STUN_TYPE.ALLOCATE_SUCCESS) {
+		const errorCode = parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE]);
+		throw new Error(errorCode ? `TURN Allocate failed with ${errorCode}` : 'TURN Allocate failed');
+	}
+
+	return { authAttributes, extraData, sign };
+}
+
+async function turnConnect(proxy, targetHost, targetPort) {
+	const targetIp = await resolveTurnTargetIPv4(targetHost);
+	if (!targetIp) throw new Error(`Could not resolve ${targetHost} to an IPv4 address for TURN CONNECT`);
+
+	const turnHost = stripIPv6Brackets(proxy.hostname);
+	let controlSocket = null;
+	let dataSocket = null;
+	let controlWriter = null;
+	let controlReader = null;
+	let dataWriter = null;
+	let dataReader = null;
+	let dataReaderReleased = false;
+
+	const close = () => {
+		try { controlSocket?.close?.(); } catch (e) { }
+		try { dataSocket?.close?.(); } catch (e) { }
+	};
+	const releaseDataReader = () => {
+		if (dataReaderReleased) return;
+		dataReaderReleased = true;
+		try { dataReader?.releaseLock?.(); } catch (e) { }
+	};
+
+	try {
+		controlSocket = connect({ hostname: turnHost, port: proxy.port });
+		await withTimeout(controlSocket.opened, CONNECT_TIMEOUT_MS, 'TURN server connection timed out');
+		controlWriter = controlSocket.writable.getWriter();
+		controlReader = controlSocket.readable.getReader();
+
+		const peerAddress = createTurnStunAttribute(
+			TURN_STUN_ATTR.XOR_PEER_ADDRESS,
+			createTurnXorPeerAddress(targetIp, targetPort)
+		);
+
+		const allocation = await allocateTurnRelay(
+			controlWriter,
+			controlReader,
+			6,
+			{ username: proxy.username, password: proxy.password },
+			(authAttributes, sign) => [
+				sign(createTurnStunMessage(
+					TURN_STUN_TYPE.CREATE_PERMISSION_REQUEST,
+					randomTurnTransactionId(),
+					[peerAddress, ...authAttributes]
+				)),
+				sign(createTurnStunMessage(
+					TURN_STUN_TYPE.CONNECT_REQUEST,
+					randomTurnTransactionId(),
+					[peerAddress, ...authAttributes]
+				))
+			]
+		);
+
+		let bufferedData = allocation.extraData;
+		dataSocket = connect({ hostname: turnHost, port: proxy.port });
+
+		let turnResponse = await readTurnStunMessage(controlReader, bufferedData, 'TURN CreatePermission response timed out');
+		let message = turnResponse.message;
+		bufferedData = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CREATE_PERMISSION_SUCCESS) throw new Error('TURN CreatePermission failed');
+
+		turnResponse = await readTurnStunMessage(controlReader, bufferedData, 'TURN CONNECT response timed out');
+		message = turnResponse.message;
+		bufferedData = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CONNECT_SUCCESS || !message.attributes[TURN_STUN_ATTR.CONNECTION_ID]) {
+			throw new Error('TURN CONNECT failed');
+		}
+
+		await withTimeout(dataSocket.opened, CONNECT_TIMEOUT_MS, 'TURN data connection timed out');
+		dataWriter = dataSocket.writable.getWriter();
+		dataReader = dataSocket.readable.getReader();
+
+		await writeTurnBytes(dataWriter, await allocation.sign(createTurnStunMessage(
+			TURN_STUN_TYPE.CONNECTION_BIND_REQUEST,
+			randomTurnTransactionId(),
+			[
+				createTurnStunAttribute(TURN_STUN_ATTR.CONNECTION_ID, message.attributes[TURN_STUN_ATTR.CONNECTION_ID]),
+				...allocation.authAttributes
+			]
+		)), 'TURN ConnectionBind request timed out');
+
+		let extraPayload = null;
+		turnResponse = await readTurnStunMessage(dataReader, null, 'TURN ConnectionBind response timed out');
+		message = turnResponse.message;
+		extraPayload = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CONNECTION_BIND_SUCCESS) throw new Error('TURN ConnectionBind failed');
+
+		controlWriter.releaseLock();
+		controlWriter = null;
+		controlReader.releaseLock();
+		controlReader = null;
+		dataWriter.releaseLock();
+		dataWriter = null;
+
+		const readable = new ReadableStream({
+			start(controller) {
+				if (extraPayload?.byteLength) controller.enqueue(extraPayload);
+			},
+			pull(controller) {
+				return dataReader.read().then(({ done, value }) => {
+					if (done) {
+						releaseDataReader();
+						controller.close();
+					} else if (value?.byteLength) {
+						controller.enqueue(new Uint8Array(value));
+					}
+				});
+			},
+			cancel() {
+				try { dataReader?.cancel?.(); } catch (e) { }
+				releaseDataReader();
+				close();
+			}
+		});
+
+		return {
+			readable,
+			writable: dataSocket.writable,
+			closed: dataSocket.closed,
+			close
+		};
+	} catch (error) {
+		try { controlWriter?.releaseLock?.(); } catch (e) { }
+		try { controlReader?.releaseLock?.(); } catch (e) { }
+		try { dataWriter?.releaseLock?.(); } catch (e) { }
+		releaseDataReader();
+		close();
+		throw error;
+	}
 }
 
 async function socks5Connect(proxy, targetHost, targetPort) {
@@ -587,12 +944,12 @@ const BASE64_AUTH_RE = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/
 
 function splitProxyScheme(input) {
 	const text = String(input || '').trim();
-	const match = text.match(/^(socks5|http|https):\/\/(.+)$/i);
+	const match = text.match(/^(socks5|http|https|turn):\/\/(.+)$/i);
 	return match ? { type: match[1].toLowerCase(), rest: match[2] } : null;
 }
 
 function stripProxyScheme(input) {
-	return String(input || '').replace(/^(socks5|http|https):\/\//i, '');
+	return String(input || '').replace(/^(socks5|http|https|turn):\/\//i, '');
 }
 
 function formatProxyAuthority(proxy) {
@@ -839,13 +1196,6 @@ async function handleResolve(input) {
 	]);
 
 	let results = recordsToTargets(aRecords, aaaaRecords, port);
-	if (!results.length) {
-		[aRecords, aaaaRecords] = await Promise.all([
-			dohQuery(host, 'A', 'https://dns.google/dns-query'),
-			dohQuery(host, 'AAAA', 'https://dns.google/dns-query')
-		]);
-		results = recordsToTargets(aRecords, aaaaRecords, port);
-	}
 	if (!results.length) throw new Error('Could not resolve domain');
 	return uniqueStrings(results);
 }
@@ -3255,7 +3605,7 @@ function generateHTML(备案内容) {
 					</button>
 				</div>
 			</div>
-			<div class="header-note">基于 Cloudflare Workers 的 SOCKS5 / HTTP / HTTPS 代理检测工具，支持单个或批量代理解析、可用性验证与出口信息查看。</div>
+			<div class="header-note">基于 Cloudflare Workers 的 SOCKS5 / HTTP / HTTPS / TURN 代理检测工具，支持单个或批量代理解析、可用性验证与出口信息查看。</div>
 		</header>
 
 		<main class="site-main">
@@ -3265,7 +3615,7 @@ function generateHTML(备案内容) {
 						<div>
 							<p class="section-kicker">Workspace</p>
 							<h2 class="panel-title">开始检测</h2>
-							<p class="panel-copy">输入单个代理链接、IP:端口、域名:端口或一整段列表。缺少协议头时会自动按 socks5:// 处理。</p>
+							<p class="panel-copy">输入单个代理链接、IP:端口、域名:端口或一整段列表，支持 SOCKS5 / HTTP / HTTPS / TURN。缺少协议头时会自动按 socks5:// 处理。</p>
 						</div>
 						<div class="panel-badge">实时解析与验证</div>
 					</div>
@@ -3273,7 +3623,7 @@ function generateHTML(备案内容) {
 					<div class="input-zone">
 						<label class="field-label" for="inputList">代理链接 / 域名代理</label>
 						<div class="input-wrapper" id="inputContainer">
-							<input class="input-control" type="text" id="inputList" placeholder="例如：socks5://user:pass@proxy.example.com:1080">
+							<input class="input-control" type="text" id="inputList" placeholder="例如：turn://root:root@203.85.37.38:81">
 							<button class="history-toggle" type="button" id="historyBtn" aria-label="查看历史记录">
 								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 									<circle cx="12" cy="12" r="10"></circle>
@@ -3483,7 +3833,8 @@ function generateHTML(备案内容) {
 		const PROTOCOL_RESULT_FILTERS = [
 			{ key: 'socks5', label: 'SOCKS5' },
 			{ key: 'http', label: 'HTTP' },
-			{ key: 'https', label: 'HTTPS' }
+			{ key: 'https', label: 'HTTPS' },
+			{ key: 'turn', label: 'TURN' }
 		];
 		const EXPORT_CSV_COLUMNS = [
 			{ header: 'TYPE', path: 'type' },
@@ -3694,6 +4045,8 @@ function generateHTML(备案内容) {
 			const mapping = {
 				isp: '住宅',
 				hosting: '机房',
+				education: '教育',
+				government: '政府',
 				business: '商用'
 			};
 			return mapping[text.toLowerCase()] || text;
@@ -3971,7 +4324,7 @@ function generateHTML(备案内容) {
 		}
 
 		function collectUrlTargetMatches(line, matches) {
-			const pattern = /(?:https?|wss?|tcp|tls|socks5?):\\/\\/[^\\s'"<>|]+/ig;
+			const pattern = /(?:https?|wss?|tcp|tls|socks5?|turn):\\/\\/[^\\s'"<>|]+/ig;
 			let match;
 			while ((match = pattern.exec(line)) !== null) {
 				addTargetMatch(line, matches, match.index, match.index + match[0].length, match[0]);
@@ -4031,7 +4384,7 @@ function generateHTML(备案内容) {
 			let token = trimTargetToken(stripInlineComment(value).replace(/\uFF1A/g, ':'));
 			if (!token) return '';
 			while (token.charAt(0) === '/') token = token.slice(1);
-			if (!/^(?:socks5|http|https):\\/\\//i.test(token)) {
+			if (!/^(?:socks5|http|https|turn):\\/\\//i.test(token)) {
 				token = 'socks5://' + token;
 			}
 			try {
@@ -4043,13 +4396,13 @@ function generateHTML(备案内容) {
 		}
 
 		function getProxyDefaultPort(scheme) {
-			return scheme === 'https' ? '443' : (scheme === 'http' ? '80' : '1080');
+			return scheme === 'turn' ? '3478' : (scheme === 'https' ? '443' : (scheme === 'http' ? '80' : '1080'));
 		}
 
 		function parseProxyUrl(value) {
 			const text = String(value || '').trim();
-			const match = text.match(/^(socks5|http|https):\\/\\/(.+)$/i);
-			if (!match) throw new Error('只支持 socks5://、http://、https:// 代理');
+			const match = text.match(/^(socks5|http|https|turn):\\/\\/(.+)$/i);
+			if (!match) throw new Error('只支持 socks5://、http://、https://、turn:// 代理');
 
 			const scheme = match[1].toLowerCase();
 			const defaultPort = getProxyDefaultPort(scheme);
@@ -4550,7 +4903,7 @@ function generateHTML(备案内容) {
 
 		function normalizeProxyType(value) {
 			const type = String(value || '').trim().toLowerCase();
-			return type === 'socks5' || type === 'http' || type === 'https' ? type : '';
+			return type === 'socks5' || type === 'http' || type === 'https' || type === 'turn' ? type : '';
 		}
 
 		function getProxyTypeFromTarget(target) {
@@ -5246,11 +5599,11 @@ function generateHTML(备案内容) {
 
 			if (isBatch) {
 				control = document.createElement('textarea');
-				control.placeholder = '每行一个代理，例如：\\nsocks5://user:pass@proxy.example.com:1080\\nhttp://1.1.1.1:8080\\nhttps://proxy.example.com:1080';
+				control.placeholder = '每行一个代理，例如：\\nsocks5://user:pass@proxy.example.com:1080\\nhttp://1.1.1.1:8080\\nturn://45.12.4.226:3478';
 			} else {
 				control = document.createElement('input');
 				control.type = 'text';
-				control.placeholder = '例如：socks5://proxy.example.com:1080';
+				control.placeholder = '例如：turn://45.12.4.226:3478';
 			}
 
 			control.id = 'inputList';
@@ -5612,7 +5965,7 @@ function generateHTML(备案内容) {
 					itemObj.info.innerHTML =
 						'<span class="result-label">候选目标</span>' +
 						buildCopyableTarget(target) +
-						'<span class="result-detail">无法通过该代理访问 Cloudflare，请更换目标后重试。</span>';
+						'<span class="result-detail">无法通过该代理访问 api.ipapi.is，请更换目标后重试。</span>';
 					itemObj.meta.innerHTML =
 						buildMetaChip('检测未通过', 'error', 'meta-chip-danger') +
 						buildMetaChip(data.error || data.message || '远端返回失败结果', 'info');
