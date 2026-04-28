@@ -5,11 +5,12 @@ const CONNECT_TIMEOUT_MS = 9999;
 const READ_TIMEOUT_MS = 8000;
 const MAX_RESPONSE_BYTES = 96 * 1024;
 const RESOLVE_BATCH_LIMIT = 50;
-const PROXY_TYPES = ['socks5', 'http', 'https'];
+const PROXY_TYPES = ['socks5', 'http', 'https', 'turn'];
 const DEFAULT_PORTS = {
 	socks5: 1080,
 	http: 80,
-	https: 443
+	https: 443,
+	turn: 3478
 };
 
 const encoder = new TextEncoder();
@@ -46,7 +47,13 @@ const DEFAULT_BEIAN_CONTENT = `© 2025 - 2026 Check Socks5 · 基于 <a href="ht
 export default {
 	async fetch(request, env, ctx) {
 		const 备案内容 = env.BEIAN ?? DEFAULT_BEIAN_CONTENT;
-		const url = new URL(fixRequestUrl(request.url));
+		let urlText = request.url;
+		const hashIndex = urlText.indexOf('#');
+		const mainUrl = hashIndex === -1 ? urlText : urlText.slice(0, hashIndex);
+		if (!mainUrl.includes('?') && /%3f/i.test(mainUrl)) {
+			urlText = mainUrl.replace(/%3f/i, '?') + (hashIndex === -1 ? '' : urlText.slice(hashIndex));
+		}
+		const url = new URL(urlText);
 		const origin = request.headers.get('Origin') || '';
 
 		if (request.method === 'OPTIONS') {
@@ -62,7 +69,28 @@ export default {
 					|| request.headers.get('X-Real-IP')
 					|| request.headers.get('True-Client-IP')
 					|| null;
-				return handleIpJson({ request, clientIP, headers });
+				const cf = request.cf || {};
+				const timezone = cf.timezone || 'UTC';
+				return new Response(JSON.stringify({
+					ip: clientIP,
+					ipType: clientIP ? (clientIP.includes(':') && !clientIP.includes('.') ? 'ipv6' : 'ipv4') : null,
+					colo: cf.colo || null,
+					asn: cf.asn || null,
+					asOrganization: cf.asOrganization || null,
+					org: cf.asn && cf.asOrganization ? `AS${cf.asn} ${cf.asOrganization}` : null,
+					continent: cf.continent || null,
+					country: cf.country || null,
+					regionCode: cf.regionCode || null,
+					region: cf.region || null,
+					city: cf.city || null,
+					postalCode: cf.postalCode || null,
+					timezone,
+					loc: cf.latitude && cf.longitude ? `${cf.latitude},${cf.longitude}` : null,
+					longitude: cf.longitude || null,
+					latitude: cf.latitude || null,
+					time: new Date().toLocaleString('zh-CN', { timeZone: timezone }),
+					timeStamp: Date.now()
+				}, null, 2), { headers });
 			}
 
 			if (url.pathname.toLowerCase() === '/resolve') {
@@ -72,18 +100,75 @@ export default {
 			}
 
 			if (url.pathname.toLowerCase() === '/resolve-batch') {
-				return handleResolveBatchRequest(request, origin);
+				const headers = jsonHeaders(origin);
+				if (request.method !== 'POST') {
+					return new Response(JSON.stringify({ error: 'Method not allowed' }), {
+						status: 405,
+						headers: { ...headers, Allow: 'POST, OPTIONS' }
+					});
+				}
+
+				let payload;
+				try {
+					payload = await request.json();
+				} catch (error) {
+					return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers });
+				}
+
+				const inputs = uniqueStrings((Array.isArray(payload?.targets) ? payload.targets : (Array.isArray(payload?.proxyips) ? payload.proxyips : []))
+					.map(value => String(value || '').trim())
+					.filter(Boolean));
+
+				if (!inputs.length) return new Response(JSON.stringify({ error: 'Missing targets' }), { status: 400, headers });
+				if (inputs.length > RESOLVE_BATCH_LIMIT) return new Response(JSON.stringify({ error: `Resolve batch limit is ${RESOLVE_BATCH_LIMIT}` }), { status: 400, headers });
+
+				const results = await Promise.all(inputs.map(async input => {
+					try {
+						return { input, targets: await handleResolve(input) };
+					} catch (error) {
+						return { input, targets: [], error: error.message };
+					}
+				}));
+
+				return new Response(JSON.stringify({ results }, null, 2), { headers });
 			}
 
 			if (url.pathname.toLowerCase().startsWith('/check')) {
-				const checkParams = parseCheckRequest(url);
+				let checkParams = null;
+				for (const type of PROXY_TYPES) {
+					if (url.searchParams.has(type)) {
+						checkParams = { type, value: url.searchParams.get(type) || '' };
+						break;
+					}
+				}
+
+				if (!checkParams && url.searchParams.has('proxy')) {
+					const value = url.searchParams.get('proxy') || '';
+					const parsed = splitProxyScheme(value);
+					if (parsed?.type) checkParams = { type: parsed.type, value: parsed.rest };
+				}
+
+				if (!checkParams) {
+					const tail = decodeURIComponent(url.pathname.slice('/check'.length).replace(/^\/+/, ''));
+					const pathMatch = tail.match(/^(socks5|http|https|turn|proxy)=(.+)$/i);
+					if (pathMatch) {
+						const key = pathMatch[1].toLowerCase();
+						const value = pathMatch[2];
+						if (key === 'proxy') {
+							const parsed = splitProxyScheme(value);
+							if (parsed?.type) checkParams = { type: parsed.type, value: parsed.rest };
+						} else if (PROXY_TYPES.includes(key)) {
+							checkParams = { type: key, value };
+						}
+					}
+				}
 				if (!checkParams) {
 					return jsonResponse({
 						success: false,
-						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port or /check?proxy=socks5://host:port'
+						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port, /check?turn=host:port or /check?proxy=socks5://host:port'
 					}, { status: 400, origin });
 				}
-				const result = await checkProxy(checkParams, url);
+				const result = await checkProxy(checkParams);
 				return jsonResponse(result, { origin });
 			}
 
@@ -127,61 +212,7 @@ function jsonResponse(data, { status = 200, origin = '' } = {}) {
 	});
 }
 
-function handleIpJson({ request, clientIP, headers }) {
-	const cf = request.cf || {};
-	const timezone = cf.timezone || 'UTC';
-	const data = {
-		ip: clientIP,
-		ipType: clientIP ? (clientIP.includes(':') && !clientIP.includes('.') ? 'ipv6' : 'ipv4') : null,
-		colo: cf.colo || null,
-		asn: cf.asn || null,
-		asOrganization: cf.asOrganization || null,
-		org: cf.asn && cf.asOrganization ? `AS${cf.asn} ${cf.asOrganization}` : null,
-		continent: cf.continent || null,
-		country: cf.country || null,
-		regionCode: cf.regionCode || null,
-		region: cf.region || null,
-		city: cf.city || null,
-		postalCode: cf.postalCode || null,
-		timezone,
-		loc: cf.latitude && cf.longitude ? `${cf.latitude},${cf.longitude}` : null,
-		longitude: cf.longitude || null,
-		latitude: cf.latitude || null,
-		time: new Date().toLocaleString('zh-CN', { timeZone: timezone }),
-		timeStamp: Date.now()
-	};
-	return new Response(JSON.stringify(data, null, 2), { headers });
-}
-
-function parseCheckRequest(url) {
-	for (const type of PROXY_TYPES) {
-		if (url.searchParams.has(type)) {
-			return { type, value: url.searchParams.get(type) || '' };
-		}
-	}
-
-	if (url.searchParams.has('proxy')) {
-		const value = url.searchParams.get('proxy') || '';
-		const parsed = splitProxyScheme(value);
-		if (parsed?.type) return { type: parsed.type, value: parsed.rest };
-	}
-
-	const tail = decodeURIComponent(url.pathname.slice('/check'.length).replace(/^\/+/, ''));
-	const pathMatch = tail.match(/^(socks5|http|https|proxy)=(.+)$/i);
-	if (pathMatch) {
-		const key = pathMatch[1].toLowerCase();
-		const value = pathMatch[2];
-		if (key === 'proxy') {
-			const parsed = splitProxyScheme(value);
-			if (parsed?.type) return { type: parsed.type, value: parsed.rest };
-		}
-		if (PROXY_TYPES.includes(key)) return { type: key, value };
-	}
-
-	return null;
-}
-
-async function checkProxy({ type, value }, requestUrl) {
+async function checkProxy({ type, value }) {
 	const startedAt = Date.now();
 	let proxy;
 
@@ -199,15 +230,101 @@ async function checkProxy({ type, value }, requestUrl) {
 	}
 
 	let tunnel = null;
-	const targetHost = 'api.ipapi.is'; //requestUrl.hostname;
-	const targetSecure = requestUrl.protocol !== 'http:';
-	const targetPort = targetSecure ? 443 : 80;
+	const targetHost = 'api.ipapi.is';
+	const targetPort = 443;
 
 	try {
-		tunnel = await withTimeout(openProxyTunnel(proxy, targetHost, targetPort), CHECK_TIMEOUT_MS, 'Proxy connection timed out');
-		const exit = targetSecure
-			? await requestIpJsonOverTlsTunnel(tunnel, targetHost)
-			: await requestIpJsonOverPlainTunnel(tunnel, targetHost);
+		let tunnelPromise;
+		if (proxy.type === 'socks5') tunnelPromise = socks5Connect(proxy, targetHost, targetPort);
+		else if (proxy.type === 'http') tunnelPromise = httpConnect(proxy, targetHost, targetPort, false);
+		else if (proxy.type === 'https') {
+			tunnelPromise = isIPHostname(proxy.hostname)
+				? httpsConnect(proxy, targetHost, targetPort)
+				: httpConnect(proxy, targetHost, targetPort, true);
+		} else if (proxy.type === 'turn') {
+			tunnelPromise = turnConnect(proxy, targetHost, targetPort);
+		} else {
+			throw new Error(`Unsupported proxy type: ${proxy.type}`);
+		}
+
+		tunnel = await withTimeout(tunnelPromise, CHECK_TIMEOUT_MS, 'Proxy connection timed out');
+		const tlsSocket = new TlsClient(tunnel, {
+			serverName: stripIPv6Brackets(targetHost),
+			timeout: READ_TIMEOUT_MS,
+			allowChacha: true
+		});
+		let exit;
+		try {
+			await withTimeout(tlsSocket.handshake(), CHECK_TIMEOUT_MS, 'Target TLS handshake timed out');
+			await tlsSocket.write(encoder.encode([
+				'GET / HTTP/1.1',
+				`Host: ${targetHost}`,
+				'User-Agent: Mozilla/5.0 CF-Workers-CheckProxy/2.0',
+				'Accept: application/json',
+				'Connection: close',
+				'',
+				''
+			].join('\r\n')));
+
+			let responseBuffer = new Uint8Array(0);
+			while (responseBuffer.byteLength < MAX_RESPONSE_BYTES) {
+				const value = await withTimeout(tlsSocket.read(), READ_TIMEOUT_MS, 'Reading target response timed out');
+				if (!value) break;
+				if (!value.byteLength) continue;
+				responseBuffer = concatUint8(responseBuffer, value);
+
+				const currentHeaderEndIndex = indexOfHeaderEnd(responseBuffer);
+				if (currentHeaderEndIndex === -1) continue;
+				const currentHeaderText = decoder.decode(responseBuffer.slice(0, currentHeaderEndIndex));
+				const currentLengthMatch = currentHeaderText.match(/\r\ncontent-length:\s*(\d+)/i);
+				if (currentLengthMatch) {
+					if (responseBuffer.byteLength >= currentHeaderEndIndex + Number(currentLengthMatch[1])) break;
+				} else if (/\r\ntransfer-encoding:\s*chunked/i.test(currentHeaderText) && decoder.decode(responseBuffer).includes('\r\n0\r\n\r\n')) {
+					break;
+				}
+			}
+			if (!responseBuffer.byteLength) throw new Error('Target returned no data');
+
+			const headerEndIndex = indexOfHeaderEnd(responseBuffer);
+			if (headerEndIndex === -1) throw new Error('Invalid target response headers');
+			const headerText = decoder.decode(responseBuffer.slice(0, headerEndIndex));
+			const statusLine = headerText.split('\r\n')[0] || '';
+			const statusMatch = statusLine.match(/HTTP\/\d(?:\.\d)?\s+(\d+)/i);
+			const statusCode = statusMatch ? Number(statusMatch[1]) : NaN;
+			if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {
+				throw new Error(`Target /ip.json request failed: ${statusLine || 'invalid status'}`);
+			}
+
+			let bodyBytes = responseBuffer.slice(headerEndIndex);
+			const lengthMatch = headerText.match(/\r\ncontent-length:\s*(\d+)/i);
+			if (lengthMatch) bodyBytes = bodyBytes.slice(0, Number(lengthMatch[1]));
+
+			let bodyText = decoder.decode(bodyBytes);
+			if (/\r\ntransfer-encoding:\s*chunked/i.test(headerText)) {
+				let cursor = 0;
+				let output = '';
+				while (cursor < bodyText.length) {
+					const lineEnd = bodyText.indexOf('\r\n', cursor);
+					if (lineEnd === -1) break;
+					const sizeText = bodyText.slice(cursor, lineEnd).split(';')[0].trim();
+					const size = parseInt(sizeText, 16);
+					if (!Number.isFinite(size)) break;
+					cursor = lineEnd + 2;
+					if (size === 0) break;
+					output += bodyText.slice(cursor, cursor + size);
+					cursor += size + 2;
+				}
+				bodyText = output || bodyText;
+			}
+
+			try {
+				exit = JSON.parse(bodyText.trim());
+			} catch (error) {
+				throw new Error('Target /ip.json did not return valid JSON');
+			}
+		} finally {
+			try { tlsSocket.close(); } catch (e) { }
+		}
 
 		return buildCheckResult({
 			type,
@@ -240,7 +357,7 @@ function buildCheckResult({ type, rawValue, proxy, success, exit = null, error =
 		password: proxy?.password ?? null,
 		hostname: proxy?.hostname ?? null,
 		port: proxy?.port ?? null,
-		link: proxy ? formatProxyLink(proxy) : `${type}://${candidate}`,
+		link: proxy ? `${proxy.type}://${formatProxyAuthority(proxy)}` : `${type}://${candidate}`,
 		success,
 		responseTime
 	};
@@ -249,145 +366,344 @@ function buildCheckResult({ type, rawValue, proxy, success, exit = null, error =
 	return result;
 }
 
-async function openProxyTunnel(proxy, targetHost, targetPort) {
-	if (proxy.type === 'socks5') return socks5Connect(proxy, targetHost, targetPort);
-	if (proxy.type === 'http') return httpConnect(proxy, targetHost, targetPort, false);
-	if (proxy.type === 'https') {
-		if (isIPHostname(proxy.hostname)) return httpsConnect(proxy, targetHost, targetPort);
-		return httpConnect(proxy, targetHost, targetPort, true);
-	}
-	throw new Error(`Unsupported proxy type: ${proxy.type}`);
-}
-
-async function requestIpJsonOverTlsTunnel(tunnel, targetHost) {
-	const tlsSocket = new TlsClient(tunnel, {
-		serverName: stripIPv6Brackets(targetHost),
-		timeout: READ_TIMEOUT_MS,
-		allowChacha: true
-	});
-	try {
-		await withTimeout(tlsSocket.handshake(), CHECK_TIMEOUT_MS, 'Target TLS handshake timed out');
-		await tlsSocket.write(encoder.encode(buildIpJsonRequest(targetHost)));
-		const responseBytes = await readTlsHttpResponse(tlsSocket);
-		return parseIpJsonResponse(responseBytes);
-	} finally {
-		try { tlsSocket.close(); } catch (e) { }
-	}
-}
-
-async function requestIpJsonOverPlainTunnel(tunnel, targetHost) {
-	const writer = tunnel.writable.getWriter();
-	try {
-		await writer.write(encoder.encode(buildIpJsonRequest(targetHost)));
-	} finally {
-		try { writer.releaseLock(); } catch (e) { }
-	}
-	const responseBytes = await readStreamHttpResponse(tunnel.readable);
-	return parseIpJsonResponse(responseBytes);
-}
-
-function buildIpJsonRequest(targetHost) {
-	return [
-		'GET / HTTP/1.1',
-		`Host: ${targetHost}`,
-		'User-Agent: Mozilla/5.0 CF-Workers-CheckProxy/2.0',
-		'Accept: application/json',
-		'Connection: close',
-		'',
-		''
-	].join('\r\n');
-}
-
-async function readTlsHttpResponse(tlsSocket) {
-	let responseBuffer = new Uint8Array(0);
-	while (responseBuffer.byteLength < MAX_RESPONSE_BYTES) {
-		const value = await withTimeout(tlsSocket.read(), READ_TIMEOUT_MS, 'Reading target response timed out');
-		if (!value) break;
-		if (!value.byteLength) continue;
-		responseBuffer = concatUint8(responseBuffer, value);
-		if (isHttpResponseComplete(responseBuffer)) break;
-	}
-	if (!responseBuffer.byteLength) throw new Error('Target returned no data');
-	return responseBuffer;
-}
-
-async function readStreamHttpResponse(readable) {
-	const reader = readable.getReader();
-	let responseBuffer = new Uint8Array(0);
-	try {
-		while (responseBuffer.byteLength < MAX_RESPONSE_BYTES) {
-			const { done, value } = await withTimeout(reader.read(), READ_TIMEOUT_MS, 'Reading target response timed out');
-			if (done) break;
-			if (!value?.byteLength) continue;
-			responseBuffer = concatUint8(responseBuffer, value);
-			if (isHttpResponseComplete(responseBuffer)) break;
-		}
-	} finally {
-		try { reader.releaseLock(); } catch (e) { }
-	}
-	if (!responseBuffer.byteLength) throw new Error('Target returned no data');
-	return responseBuffer;
-}
-
-function parseIpJsonResponse(responseBuffer) {
-	const headerEndIndex = indexOfHeaderEnd(responseBuffer);
-	if (headerEndIndex === -1) throw new Error('Invalid target response headers');
-	const headerText = decoder.decode(responseBuffer.slice(0, headerEndIndex));
-	const statusLine = headerText.split('\r\n')[0] || '';
-	const statusMatch = statusLine.match(/HTTP\/\d(?:\.\d)?\s+(\d+)/i);
-	const statusCode = statusMatch ? Number(statusMatch[1]) : NaN;
-	if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) {
-		throw new Error(`Target /ip.json request failed: ${statusLine || 'invalid status'}`);
-	}
-
-	let bodyBytes = responseBuffer.slice(headerEndIndex);
-	const lengthMatch = headerText.match(/\r\ncontent-length:\s*(\d+)/i);
-	if (lengthMatch) bodyBytes = bodyBytes.slice(0, Number(lengthMatch[1]));
-
-	let bodyText = decoder.decode(bodyBytes);
-	if (/\r\ntransfer-encoding:\s*chunked/i.test(headerText)) {
-		bodyText = decodeChunkedBody(bodyText);
-	}
-
-	try {
-		return JSON.parse(bodyText.trim());
-	} catch (error) {
-		throw new Error('Target /ip.json did not return valid JSON');
-	}
-}
-
-function isHttpResponseComplete(buffer) {
-	const headerEndIndex = indexOfHeaderEnd(buffer);
-	if (headerEndIndex === -1) return false;
-	const headerText = decoder.decode(buffer.slice(0, headerEndIndex));
-	const lengthMatch = headerText.match(/\r\ncontent-length:\s*(\d+)/i);
-	if (lengthMatch) return buffer.byteLength >= headerEndIndex + Number(lengthMatch[1]);
-	if (/\r\ntransfer-encoding:\s*chunked/i.test(headerText)) return decoder.decode(buffer).includes('\r\n0\r\n\r\n');
-	return false;
-}
-
-function decodeChunkedBody(text) {
-	let cursor = 0;
-	let output = '';
-	while (cursor < text.length) {
-		const lineEnd = text.indexOf('\r\n', cursor);
-		if (lineEnd === -1) break;
-		const sizeText = text.slice(cursor, lineEnd).split(';')[0].trim();
-		const size = parseInt(sizeText, 16);
-		if (!Number.isFinite(size)) break;
-		cursor = lineEnd + 2;
-		if (size === 0) break;
-		output += text.slice(cursor, cursor + size);
-		cursor += size + 2;
-	}
-	return output || text;
-}
-
 function indexOfHeaderEnd(buffer) {
 	for (let i = 0; i < buffer.byteLength - 3; i++) {
 		if (buffer[i] === 0x0d && buffer[i + 1] === 0x0a && buffer[i + 2] === 0x0d && buffer[i + 3] === 0x0a) return i + 4;
 	}
 	return -1;
+}
+
+const TURN_STUN_MAGIC_COOKIE = new Uint8Array([0x21, 0x12, 0xa4, 0x42]);
+const TURN_STUN_TYPE = {
+	ALLOCATE_REQUEST: 0x0003,
+	ALLOCATE_SUCCESS: 0x0103,
+	ALLOCATE_ERROR: 0x0113,
+	CREATE_PERMISSION_REQUEST: 0x0008,
+	CREATE_PERMISSION_SUCCESS: 0x0108,
+	CONNECT_REQUEST: 0x000a,
+	CONNECT_SUCCESS: 0x010a,
+	CONNECTION_BIND_REQUEST: 0x000b,
+	CONNECTION_BIND_SUCCESS: 0x010b
+};
+const TURN_STUN_ATTR = {
+	USERNAME: 0x0006,
+	MESSAGE_INTEGRITY: 0x0008,
+	ERROR_CODE: 0x0009,
+	XOR_PEER_ADDRESS: 0x0012,
+	REALM: 0x0014,
+	NONCE: 0x0015,
+	REQUESTED_TRANSPORT: 0x0019,
+	CONNECTION_ID: 0x002a
+};
+
+function turnStunPadding(length) {
+	return -length & 3;
+}
+
+function createTurnStunAttribute(type, value) {
+	const body = 数据转Uint8Array(value);
+	const attribute = new Uint8Array(4 + body.byteLength + turnStunPadding(body.byteLength));
+	const view = new DataView(attribute.buffer);
+	view.setUint16(0, type);
+	view.setUint16(2, body.byteLength);
+	attribute.set(body, 4);
+	return attribute;
+}
+
+function createTurnStunMessage(type, transactionId, attributes) {
+	const body = concatUint8(...attributes);
+	const header = new Uint8Array(20);
+	const view = new DataView(header.buffer);
+	view.setUint16(0, type);
+	view.setUint16(2, body.byteLength);
+	header.set(TURN_STUN_MAGIC_COOKIE, 4);
+	header.set(transactionId, 8);
+	return concatUint8(header, body);
+}
+
+/** @typedef {{ type: number, attributes: Record<number, Uint8Array> }} TurnStunMessage */
+
+function parseTurnErrorCode(data) {
+	return data?.byteLength >= 4 ? (data[2] & 7) * 100 + data[3] : 0;
+}
+
+function randomTurnTransactionId() {
+	return crypto.getRandomValues(new Uint8Array(12));
+}
+
+async function addTurnMessageIntegrity(message, key) {
+	const signedMessage = new Uint8Array(message);
+	const view = new DataView(signedMessage.buffer);
+	view.setUint16(2, view.getUint16(2) + 24);
+
+	const hmacKey = await crypto.subtle.importKey(
+		'raw',
+		key,
+		{ name: 'HMAC', hash: 'SHA-1' },
+		false,
+		['sign']
+	);
+	const signature = await crypto.subtle.sign('HMAC', hmacKey, signedMessage);
+	return concatUint8(
+		signedMessage,
+		createTurnStunAttribute(TURN_STUN_ATTR.MESSAGE_INTEGRITY, new Uint8Array(signature))
+	);
+}
+
+/** @returns {Promise<{ message: TurnStunMessage, extraData: Uint8Array | null }>} */
+async function readTurnStunMessage(reader, bufferedData = null, timeoutMessage = 'TURN response timed out') {
+	let buffer = 有效数据长度(bufferedData) ? 数据转Uint8Array(bufferedData) : new Uint8Array(0);
+	const pull = async () => {
+		const { done, value } = await withTimeout(reader.read(), CONNECT_TIMEOUT_MS, timeoutMessage);
+		if (done) throw new Error('TURN server closed connection');
+		if (value?.byteLength) buffer = concatUint8(buffer, value);
+	};
+
+	while (buffer.byteLength < 20) await pull();
+
+	const messageLength = 20 + ((buffer[2] << 8) | buffer[3]);
+	if (messageLength > 65555) throw new Error('TURN response is too large');
+	while (buffer.byteLength < messageLength) await pull();
+
+	const messageBuffer = buffer.subarray(0, messageLength);
+	if (TURN_STUN_MAGIC_COOKIE.some((value, index) => messageBuffer[4 + index] !== value)) throw new Error('Invalid TURN/STUN response');
+	const view = new DataView(messageBuffer.buffer, messageBuffer.byteOffset, messageBuffer.byteLength);
+	/** @type {Record<number, Uint8Array>} */
+	const attributes = {};
+
+	for (let offset = 20; offset + 4 <= messageLength;) {
+		const type = view.getUint16(offset);
+		const length = view.getUint16(offset + 2);
+		if (offset + 4 + length > messageBuffer.byteLength) break;
+
+		attributes[type] = messageBuffer.slice(offset + 4, offset + 4 + length);
+		offset += 4 + length + turnStunPadding(length);
+	}
+
+	return {
+		message: {
+			type: view.getUint16(0),
+			attributes
+		},
+		extraData: buffer.byteLength > messageLength ? buffer.subarray(messageLength) : null
+	};
+}
+
+async function writeTurnBytes(writer, bytes, timeoutMessage) {
+	await withTimeout(writer.write(bytes), CONNECT_TIMEOUT_MS, timeoutMessage);
+}
+
+async function allocateTurnRelay(writer, reader, transport, credentials, pipeline) {
+	const requestedTransport = new Uint8Array([transport, 0, 0, 0]);
+	await writeTurnBytes(writer, createTurnStunMessage(
+		TURN_STUN_TYPE.ALLOCATE_REQUEST,
+		randomTurnTransactionId(),
+		[createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT, requestedTransport)]
+	), 'TURN Allocate request timed out');
+
+	let turnResponse = await readTurnStunMessage(reader, null, 'TURN Allocate response timed out');
+	let message = turnResponse.message;
+	let extraData = turnResponse.extraData;
+	let integrityKey = null;
+	let authAttributes = [];
+	const sign = messageToSign => (
+		integrityKey ? addTurnMessageIntegrity(messageToSign, integrityKey) : Promise.resolve(messageToSign)
+	);
+
+	if (
+		message.type === TURN_STUN_TYPE.ALLOCATE_ERROR
+		&& credentials.username !== null
+		&& credentials.password !== null
+		&& parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE]) === 401
+	) {
+		const realmBytes = message.attributes[TURN_STUN_ATTR.REALM];
+		const nonce = message.attributes[TURN_STUN_ATTR.NONCE];
+		if (!realmBytes?.byteLength || !nonce?.byteLength) throw new Error('TURN authentication challenge is missing realm or nonce');
+
+		const realm = decoder.decode(realmBytes);
+		integrityKey = new Uint8Array(await crypto.subtle.digest('MD5', encoder.encode(`${credentials.username}:${realm}:${credentials.password}`)));
+		authAttributes = [
+			createTurnStunAttribute(TURN_STUN_ATTR.USERNAME, encoder.encode(credentials.username)),
+			createTurnStunAttribute(TURN_STUN_ATTR.REALM, encoder.encode(realm)),
+			createTurnStunAttribute(TURN_STUN_ATTR.NONCE, nonce)
+		];
+
+		const allocateRequest = await addTurnMessageIntegrity(createTurnStunMessage(
+			TURN_STUN_TYPE.ALLOCATE_REQUEST,
+			randomTurnTransactionId(),
+			[
+				createTurnStunAttribute(TURN_STUN_ATTR.REQUESTED_TRANSPORT, requestedTransport),
+				...authAttributes
+			]
+		), integrityKey);
+
+		const pipelinedMessages = pipeline ? await Promise.all(pipeline(authAttributes, sign)) : [];
+		await writeTurnBytes(
+			writer,
+			pipelinedMessages.length ? concatUint8(allocateRequest, ...pipelinedMessages) : allocateRequest,
+			'TURN authenticated Allocate request timed out'
+		);
+
+		turnResponse = await readTurnStunMessage(reader, extraData, 'TURN authenticated Allocate response timed out');
+		message = turnResponse.message;
+		extraData = turnResponse.extraData;
+	} else if (pipeline && message.type === TURN_STUN_TYPE.ALLOCATE_SUCCESS) {
+		const pipelinedMessages = await Promise.all(pipeline(authAttributes, sign));
+		if (pipelinedMessages.length) {
+			await writeTurnBytes(writer, concatUint8(...pipelinedMessages), 'TURN pipelined request timed out');
+		}
+	}
+
+	if (message.type !== TURN_STUN_TYPE.ALLOCATE_SUCCESS) {
+		const errorCode = parseTurnErrorCode(message.attributes[TURN_STUN_ATTR.ERROR_CODE]);
+		throw new Error(errorCode ? `TURN Allocate failed with ${errorCode}` : 'TURN Allocate failed');
+	}
+
+	return { authAttributes, extraData, sign };
+}
+
+async function turnConnect(proxy, targetHost, targetPort) {
+	const resolvedTargetHost = stripIPv6Brackets(targetHost);
+	let targetIp = isIPv4(resolvedTargetHost) ? resolvedTargetHost : null;
+	if (!targetIp) {
+		const records = await DoH查询(resolvedTargetHost, 'A');
+		const record = records.find(item => item.type === 1 && isIPv4(item.data));
+		targetIp = record?.data || null;
+	}
+	if (!targetIp) throw new Error(`Could not resolve ${targetHost} to an IPv4 address for TURN CONNECT`);
+
+	const turnHost = stripIPv6Brackets(proxy.hostname);
+	let controlSocket = null;
+	let dataSocket = null;
+	let controlWriter = null;
+	let controlReader = null;
+	let dataWriter = null;
+	let dataReader = null;
+	let dataReaderReleased = false;
+
+	const close = () => {
+		try { controlSocket?.close?.(); } catch (e) { }
+		try { dataSocket?.close?.(); } catch (e) { }
+	};
+	const releaseDataReader = () => {
+		if (dataReaderReleased) return;
+		dataReaderReleased = true;
+		try { dataReader?.releaseLock?.(); } catch (e) { }
+	};
+
+	try {
+		controlSocket = connect({ hostname: turnHost, port: proxy.port });
+		await withTimeout(controlSocket.opened, CONNECT_TIMEOUT_MS, 'TURN server connection timed out');
+		controlWriter = controlSocket.writable.getWriter();
+		controlReader = controlSocket.readable.getReader();
+
+		if (!isIPv4(targetIp)) throw new Error('TURN CONNECT currently requires an IPv4 target address');
+		const xorPeerAddress = new Uint8Array(8);
+		xorPeerAddress[1] = 1;
+		new DataView(xorPeerAddress.buffer).setUint16(2, targetPort ^ 0x2112);
+		targetIp.split('.').forEach((value, index) => {
+			xorPeerAddress[4 + index] = Number(value) ^ TURN_STUN_MAGIC_COOKIE[index];
+		});
+		const peerAddress = createTurnStunAttribute(
+			TURN_STUN_ATTR.XOR_PEER_ADDRESS,
+			xorPeerAddress
+		);
+
+		const allocation = await allocateTurnRelay(
+			controlWriter,
+			controlReader,
+			6,
+			{ username: proxy.username, password: proxy.password },
+			(authAttributes, sign) => [
+				sign(createTurnStunMessage(
+					TURN_STUN_TYPE.CREATE_PERMISSION_REQUEST,
+					randomTurnTransactionId(),
+					[peerAddress, ...authAttributes]
+				)),
+				sign(createTurnStunMessage(
+					TURN_STUN_TYPE.CONNECT_REQUEST,
+					randomTurnTransactionId(),
+					[peerAddress, ...authAttributes]
+				))
+			]
+		);
+
+		let bufferedData = allocation.extraData;
+		dataSocket = connect({ hostname: turnHost, port: proxy.port });
+
+		let turnResponse = await readTurnStunMessage(controlReader, bufferedData, 'TURN CreatePermission response timed out');
+		let message = turnResponse.message;
+		bufferedData = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CREATE_PERMISSION_SUCCESS) throw new Error('TURN CreatePermission failed');
+
+		turnResponse = await readTurnStunMessage(controlReader, bufferedData, 'TURN CONNECT response timed out');
+		message = turnResponse.message;
+		bufferedData = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CONNECT_SUCCESS || !message.attributes[TURN_STUN_ATTR.CONNECTION_ID]) {
+			throw new Error('TURN CONNECT failed');
+		}
+
+		await withTimeout(dataSocket.opened, CONNECT_TIMEOUT_MS, 'TURN data connection timed out');
+		dataWriter = dataSocket.writable.getWriter();
+		dataReader = dataSocket.readable.getReader();
+
+		await writeTurnBytes(dataWriter, await allocation.sign(createTurnStunMessage(
+			TURN_STUN_TYPE.CONNECTION_BIND_REQUEST,
+			randomTurnTransactionId(),
+			[
+				createTurnStunAttribute(TURN_STUN_ATTR.CONNECTION_ID, message.attributes[TURN_STUN_ATTR.CONNECTION_ID]),
+				...allocation.authAttributes
+			]
+		)), 'TURN ConnectionBind request timed out');
+
+		let extraPayload = null;
+		turnResponse = await readTurnStunMessage(dataReader, null, 'TURN ConnectionBind response timed out');
+		message = turnResponse.message;
+		extraPayload = turnResponse.extraData;
+		if (message.type !== TURN_STUN_TYPE.CONNECTION_BIND_SUCCESS) throw new Error('TURN ConnectionBind failed');
+
+		controlWriter.releaseLock();
+		controlWriter = null;
+		controlReader.releaseLock();
+		controlReader = null;
+		dataWriter.releaseLock();
+		dataWriter = null;
+
+		const readable = new ReadableStream({
+			start(controller) {
+				if (extraPayload?.byteLength) controller.enqueue(extraPayload);
+			},
+			pull(controller) {
+				return dataReader.read().then(({ done, value }) => {
+					if (done) {
+						releaseDataReader();
+						controller.close();
+					} else if (value?.byteLength) {
+						controller.enqueue(new Uint8Array(value));
+					}
+				});
+			},
+			cancel() {
+				try { dataReader?.cancel?.(); } catch (e) { }
+				releaseDataReader();
+				close();
+			}
+		});
+
+		return {
+			readable,
+			writable: dataSocket.writable,
+			closed: dataSocket.closed,
+			close
+		};
+	} catch (error) {
+		try { controlWriter?.releaseLock?.(); } catch (e) { }
+		try { controlReader?.releaseLock?.(); } catch (e) { }
+		try { dataWriter?.releaseLock?.(); } catch (e) { }
+		releaseDataReader();
+		close();
+		throw error;
+	}
 }
 
 async function socks5Connect(proxy, targetHost, targetPort) {
@@ -467,7 +783,36 @@ async function httpConnect(proxy, targetHost, targetPort, secureProxy = false) {
 
 		reader.releaseLock();
 		if (responseBuffer.byteLength > headerEndIndex) {
-			return wrapSocketWithBufferedData(socket, responseBuffer.slice(headerEndIndex));
+			const bufferedData = responseBuffer.slice(headerEndIndex);
+			const readable = new ReadableStream({
+				async start(controller) {
+					try {
+						controller.enqueue(bufferedData);
+						const bufferedReader = socket.readable.getReader();
+						try {
+							while (true) {
+								const { done, value } = await bufferedReader.read();
+								if (done) break;
+								if (value?.byteLength) controller.enqueue(value);
+							}
+							controller.close();
+						} finally {
+							try { bufferedReader.releaseLock(); } catch (e) { }
+						}
+					} catch (error) {
+						controller.error(error);
+					}
+				},
+				cancel() {
+					try { socket.close(); } catch (e) { }
+				}
+			});
+			return {
+				readable,
+				writable: socket.writable,
+				closed: socket.closed,
+				close: () => socket.close()
+			};
 		}
 		return socket;
 	} catch (error) {
@@ -523,7 +868,57 @@ async function httpsConnect(proxy, targetHost, targetPort) {
 		const statusCode = statusMatch ? Number(statusMatch[1]) : NaN;
 		if (!Number.isFinite(statusCode) || statusCode < 200 || statusCode >= 300) throw new Error(`CONNECT failed: ${statusLine || statusCode}`);
 
-		return wrapTlsSocket(tlsSocket, responseBuffer.byteLength > headerEndIndex ? responseBuffer.slice(headerEndIndex) : null);
+		const bufferedData = responseBuffer.byteLength > headerEndIndex ? responseBuffer.slice(headerEndIndex) : null;
+		let closedSettled = false;
+		let resolveClosed;
+		let rejectClosed;
+		const closed = new Promise((resolve, reject) => {
+			resolveClosed = resolve;
+			rejectClosed = reject;
+		});
+		const settleClosed = (settle, value) => {
+			if (closedSettled) return;
+			closedSettled = true;
+			settle(value);
+		};
+		const close = () => {
+			try { tlsSocket.close(); } catch (e) { }
+			settleClosed(resolveClosed);
+		};
+
+		const readable = new ReadableStream({
+			async start(controller) {
+				try {
+					if (有效数据长度(bufferedData) > 0) controller.enqueue(数据转Uint8Array(bufferedData));
+					while (true) {
+						const data = await tlsSocket.read();
+						if (!data) break;
+						if (data.byteLength > 0) controller.enqueue(data);
+					}
+					controller.close();
+					settleClosed(resolveClosed);
+				} catch (error) {
+					try { controller.error(error); } catch (e) { }
+					settleClosed(rejectClosed, error);
+				}
+			},
+			cancel() {
+				close();
+			}
+		});
+
+		const writable = new WritableStream({
+			async write(chunk) {
+				await tlsSocket.write(数据转Uint8Array(chunk));
+			},
+			close,
+			abort(error) {
+				close();
+				if (error) settleClosed(rejectClosed, error);
+			}
+		});
+
+		return { readable, writable, closed, close };
 	} catch (error) {
 		try { tlsSocket?.close?.(); } catch (e) { }
 		throw error;
@@ -587,12 +982,12 @@ const BASE64_AUTH_RE = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/
 
 function splitProxyScheme(input) {
 	const text = String(input || '').trim();
-	const match = text.match(/^(socks5|http|https):\/\/(.+)$/i);
+	const match = text.match(/^(socks5|http|https|turn):\/\/(.+)$/i);
 	return match ? { type: match[1].toLowerCase(), rest: match[2] } : null;
 }
 
 function stripProxyScheme(input) {
-	return String(input || '').replace(/^(socks5|http|https):\/\//i, '');
+	return String(input || '').replace(/^(socks5|http|https|turn):\/\//i, '');
 }
 
 function formatProxyAuthority(proxy) {
@@ -600,20 +995,8 @@ function formatProxyAuthority(proxy) {
 	return `${auth}${proxy.hostname}:${proxy.port}`;
 }
 
-function formatProxyLink(proxy) {
-	return `${proxy.type}://${formatProxyAuthority(proxy)}`;
-}
-
 function safeDecode(value) {
 	try { return decodeURIComponent(value); } catch (e) { return value; }
-}
-
-function fixRequestUrl(urlText) {
-	const hashIndex = urlText.indexOf('#');
-	const main = hashIndex === -1 ? urlText : urlText.slice(0, hashIndex);
-	const tail = hashIndex === -1 ? '' : urlText.slice(hashIndex);
-	if (main.includes('?') || !/%3f/i.test(main)) return urlText;
-	return main.replace(/%3f/i, '?') + tail;
 }
 
 async function withTimeout(promise, timeoutMs, message) {
@@ -656,96 +1039,6 @@ function concatUint8(...chunks) {
 	return output;
 }
 
-function 拼接字节数据(...chunks) {
-	return concatUint8(...chunks);
-}
-
-function wrapSocketWithBufferedData(socket, bufferedData) {
-	if (!有效数据长度(bufferedData)) return socket;
-	const readable = new ReadableStream({
-		async start(controller) {
-			try {
-				controller.enqueue(数据转Uint8Array(bufferedData));
-				const reader = socket.readable.getReader();
-				try {
-					while (true) {
-						const { done, value } = await reader.read();
-						if (done) break;
-						if (value?.byteLength) controller.enqueue(value);
-					}
-					controller.close();
-				} finally {
-					try { reader.releaseLock(); } catch (e) { }
-				}
-			} catch (error) {
-				controller.error(error);
-			}
-		},
-		cancel() {
-			try { socket.close(); } catch (e) { }
-		}
-	});
-	return {
-		readable,
-		writable: socket.writable,
-		closed: socket.closed,
-		close: () => socket.close()
-	};
-}
-
-function wrapTlsSocket(tlsSocket, bufferedData = null) {
-	let closedSettled = false;
-	let resolveClosed;
-	let rejectClosed;
-	const closed = new Promise((resolve, reject) => {
-		resolveClosed = resolve;
-		rejectClosed = reject;
-	});
-	const settleClosed = (settle, value) => {
-		if (closedSettled) return;
-		closedSettled = true;
-		settle(value);
-	};
-	const close = () => {
-		try { tlsSocket.close(); } catch (e) { }
-		settleClosed(resolveClosed);
-	};
-
-	const readable = new ReadableStream({
-		async start(controller) {
-			try {
-				if (有效数据长度(bufferedData) > 0) controller.enqueue(数据转Uint8Array(bufferedData));
-				while (true) {
-					const data = await tlsSocket.read();
-					if (!data) break;
-					if (data.byteLength > 0) controller.enqueue(data);
-				}
-				controller.close();
-				settleClosed(resolveClosed);
-			} catch (error) {
-				try { controller.error(error); } catch (e) { }
-				settleClosed(rejectClosed, error);
-			}
-		},
-		cancel() {
-			close();
-		}
-	});
-
-	const writable = new WritableStream({
-		async write(chunk) {
-			await tlsSocket.write(数据转Uint8Array(chunk));
-		},
-		close,
-		abort(error) {
-			close();
-			if (error) settleClosed(rejectClosed, error);
-		}
-	});
-
-	return { readable, writable, closed, close };
-}
-
 function stripIPv6Brackets(hostname = '') {
 	const host = String(hostname || '').trim();
 	return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
@@ -772,85 +1065,7 @@ function isIPv4(value) {
 	});
 }
 
-async function handleResolveBatchRequest(request, origin = '') {
-	const headers = jsonHeaders(origin);
-	if (request.method !== 'POST') {
-		return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-			status: 405,
-			headers: { ...headers, Allow: 'POST, OPTIONS' }
-		});
-	}
-
-	let payload;
-	try {
-		payload = await request.json();
-	} catch (error) {
-		return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400, headers });
-	}
-
-	const inputs = uniqueStrings((Array.isArray(payload?.targets) ? payload.targets : (Array.isArray(payload?.proxyips) ? payload.proxyips : []))
-		.map(value => String(value || '').trim())
-		.filter(Boolean));
-
-	if (!inputs.length) return new Response(JSON.stringify({ error: 'Missing targets' }), { status: 400, headers });
-	if (inputs.length > RESOLVE_BATCH_LIMIT) return new Response(JSON.stringify({ error: `Resolve batch limit is ${RESOLVE_BATCH_LIMIT}` }), { status: 400, headers });
-
-	const results = await Promise.all(inputs.map(async input => {
-		try {
-			return { input, targets: await handleResolve(input) };
-		} catch (error) {
-			return { input, targets: [], error: error.message };
-		}
-	}));
-
-	return new Response(JSON.stringify({ results }, null, 2), { headers });
-}
-
 async function handleResolve(input) {
-	let { host, port } = parseTarget(input);
-	const tpPortMatch = host.toLowerCase().match(/\.tp(\d{1,5})\./);
-	if (tpPortMatch) {
-		const tpPort = Number(tpPortMatch[1]);
-		if (tpPort >= 1 && tpPort <= 65535) port = tpPort;
-	}
-
-	const bracketedIPv6 = host.startsWith('[') && host.endsWith(']');
-	const rawIPv6 = /^[0-9a-fA-F:]+$/.test(host) && host.includes(':');
-	if (isIPv4(host) || bracketedIPv6 || rawIPv6) {
-		const finalHost = rawIPv6 && !bracketedIPv6 ? `[${host}]` : host;
-		return [`${finalHost}:${port}`];
-	}
-
-	if (host.toLowerCase().includes('.william.')) {
-		const txtRecords = await dohQuery(host, 'TXT');
-		const targets = [];
-		for (const record of txtRecords) {
-			for (const part of normalizeTxtValue(record.data).split(',')) {
-				const candidate = part.trim();
-				if (candidate) targets.push(candidate);
-			}
-		}
-		if (targets.length) return uniqueStrings(targets);
-	}
-
-	let [aRecords, aaaaRecords] = await Promise.all([
-		dohQuery(host, 'A'),
-		dohQuery(host, 'AAAA')
-	]);
-
-	let results = recordsToTargets(aRecords, aaaaRecords, port);
-	if (!results.length) {
-		[aRecords, aaaaRecords] = await Promise.all([
-			dohQuery(host, 'A', 'https://dns.google/dns-query'),
-			dohQuery(host, 'AAAA', 'https://dns.google/dns-query')
-		]);
-		results = recordsToTargets(aRecords, aaaaRecords, port);
-	}
-	if (!results.length) throw new Error('Could not resolve domain');
-	return uniqueStrings(results);
-}
-
-function parseTarget(input) {
 	let text = String(input || '').trim().split('#')[0].trim();
 	const proxy = splitProxyScheme(text);
 	if (proxy) text = proxy.rest;
@@ -867,26 +1082,35 @@ function parseTarget(input) {
 				host = host.slice(0, ipv6PortIndex + 1);
 			}
 		}
-		return { host, port };
-	}
-
-	const colonMatches = host.match(/:/g) || [];
-	if (colonMatches.length === 1) {
-		const separatorIndex = host.lastIndexOf(':');
-		const maybePort = Number(host.slice(separatorIndex + 1));
-		if (Number.isInteger(maybePort) && maybePort >= 1 && maybePort <= 65535) {
-			port = maybePort;
-			host = host.slice(0, separatorIndex);
+	} else {
+		const colonMatches = host.match(/:/g) || [];
+		if (colonMatches.length === 1) {
+			const separatorIndex = host.lastIndexOf(':');
+			const maybePort = Number(host.slice(separatorIndex + 1));
+			if (Number.isInteger(maybePort) && maybePort >= 1 && maybePort <= 65535) {
+				port = maybePort;
+				host = host.slice(0, separatorIndex);
+			}
 		}
 	}
-	return { host, port };
-}
 
-function recordsToTargets(aRecords, aaaaRecords, port) {
-	const results = [];
+	const bracketedIPv6 = host.startsWith('[') && host.endsWith(']');
+	const rawIPv6 = /^[0-9a-fA-F:]+$/.test(host) && host.includes(':');
+	if (isIPv4(host) || bracketedIPv6 || rawIPv6) {
+		const finalHost = rawIPv6 && !bracketedIPv6 ? `[${host}]` : host;
+		return [`${finalHost}:${port}`];
+	}
+
+	let [aRecords, aaaaRecords] = await Promise.all([
+		DoH查询(host, 'A'),
+		DoH查询(host, 'AAAA')
+	]);
+
+	let results = [];
 	for (const record of aRecords.filter(item => item.type === 1 && item.data)) results.push(`${record.data}:${port}`);
 	for (const record of aaaaRecords.filter(item => item.type === 28 && item.data)) results.push(`[${record.data}]:${port}`);
-	return results;
+	if (!results.length) throw new Error('Could not resolve domain');
+	return uniqueStrings(results);
 }
 
 function uniqueStrings(values) {
@@ -904,7 +1128,7 @@ function normalizeTxtValue(value) {
 	return text.replace(/\\"/g, '"');
 }
 
-async function dohQuery(name, type, endpoint = 'https://cloudflare-dns.com/dns-query') {
+async function DoH查询(name, type, endpoint = 'https://cloudflare-dns.com/dns-query') {
 	try {
 		const response = await fetch(`${endpoint}?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`, {
 			headers: { accept: 'application/dns-json' }
@@ -3255,7 +3479,7 @@ function generateHTML(备案内容) {
 					</button>
 				</div>
 			</div>
-			<div class="header-note">基于 Cloudflare Workers 的 SOCKS5 / HTTP / HTTPS 代理检测工具，支持单个或批量代理解析、可用性验证与出口信息查看。</div>
+			<div class="header-note">基于 Cloudflare Workers 的 SOCKS5 / HTTP / HTTPS / TURN 代理检测工具，支持单个或批量代理解析、可用性验证与出口信息查看。</div>
 		</header>
 
 		<main class="site-main">
@@ -3265,7 +3489,7 @@ function generateHTML(备案内容) {
 						<div>
 							<p class="section-kicker">Workspace</p>
 							<h2 class="panel-title">开始检测</h2>
-							<p class="panel-copy">输入单个代理链接、IP:端口、域名:端口或一整段列表。缺少协议头时会自动按 socks5:// 处理。</p>
+							<p class="panel-copy">输入单个代理链接、IP:端口、域名:端口或一整段列表，支持 SOCKS5 / HTTP / HTTPS / TURN。缺少协议头时会自动按 socks5:// 处理。</p>
 						</div>
 						<div class="panel-badge">实时解析与验证</div>
 					</div>
@@ -3483,7 +3707,8 @@ function generateHTML(备案内容) {
 		const PROTOCOL_RESULT_FILTERS = [
 			{ key: 'socks5', label: 'SOCKS5' },
 			{ key: 'http', label: 'HTTP' },
-			{ key: 'https', label: 'HTTPS' }
+			{ key: 'https', label: 'HTTPS' },
+			{ key: 'turn', label: 'TURN' }
 		];
 		const EXPORT_CSV_COLUMNS = [
 			{ header: 'TYPE', path: 'type' },
@@ -3694,6 +3919,8 @@ function generateHTML(备案内容) {
 			const mapping = {
 				isp: '住宅',
 				hosting: '机房',
+				education: '教育',
+				government: '政府',
 				business: '商用'
 			};
 			return mapping[text.toLowerCase()] || text;
@@ -3971,7 +4198,7 @@ function generateHTML(备案内容) {
 		}
 
 		function collectUrlTargetMatches(line, matches) {
-			const pattern = /(?:https?|wss?|tcp|tls|socks5?):\\/\\/[^\\s'"<>|]+/ig;
+			const pattern = /(?:https?|wss?|tcp|tls|socks5?|turn):\\/\\/[^\\s'"<>|]+/ig;
 			let match;
 			while ((match = pattern.exec(line)) !== null) {
 				addTargetMatch(line, matches, match.index, match.index + match[0].length, match[0]);
@@ -4031,7 +4258,7 @@ function generateHTML(备案内容) {
 			let token = trimTargetToken(stripInlineComment(value).replace(/\uFF1A/g, ':'));
 			if (!token) return '';
 			while (token.charAt(0) === '/') token = token.slice(1);
-			if (!/^(?:socks5|http|https):\\/\\//i.test(token)) {
+			if (!/^(?:socks5|http|https|turn):\\/\\//i.test(token)) {
 				token = 'socks5://' + token;
 			}
 			try {
@@ -4043,13 +4270,13 @@ function generateHTML(备案内容) {
 		}
 
 		function getProxyDefaultPort(scheme) {
-			return scheme === 'https' ? '443' : (scheme === 'http' ? '80' : '1080');
+			return scheme === 'turn' ? '3478' : (scheme === 'https' ? '443' : (scheme === 'http' ? '80' : '1080'));
 		}
 
 		function parseProxyUrl(value) {
 			const text = String(value || '').trim();
-			const match = text.match(/^(socks5|http|https):\\/\\/(.+)$/i);
-			if (!match) throw new Error('只支持 socks5://、http://、https:// 代理');
+			const match = text.match(/^(socks5|http|https|turn):\\/\\/(.+)$/i);
+			if (!match) throw new Error('只支持 socks5://、http://、https://、turn:// 代理');
 
 			const scheme = match[1].toLowerCase();
 			const defaultPort = getProxyDefaultPort(scheme);
@@ -4550,7 +4777,7 @@ function generateHTML(备案内容) {
 
 		function normalizeProxyType(value) {
 			const type = String(value || '').trim().toLowerCase();
-			return type === 'socks5' || type === 'http' || type === 'https' ? type : '';
+			return type === 'socks5' || type === 'http' || type === 'https' || type === 'turn' ? type : '';
 		}
 
 		function getProxyTypeFromTarget(target) {
@@ -5246,11 +5473,11 @@ function generateHTML(备案内容) {
 
 			if (isBatch) {
 				control = document.createElement('textarea');
-				control.placeholder = '每行一个代理，例如：\\nsocks5://user:pass@proxy.example.com:1080\\nhttp://1.1.1.1:8080\\nhttps://proxy.example.com:1080';
+				control.placeholder = '每行一个代理，例如：\\nsocks5://user:pass@proxy.example.com:1080\\nhttp://1.1.1.1:8080\\nhttps://8.8.8.8:443\\nturn://test:test@167.172.34.1:3478';
 			} else {
 				control = document.createElement('input');
 				control.type = 'text';
-				control.placeholder = '例如：socks5://proxy.example.com:1080';
+				control.placeholder = '例如：socks5://user:pass@proxy.example.com:1080';
 			}
 
 			control.id = 'inputList';
@@ -5612,7 +5839,7 @@ function generateHTML(备案内容) {
 					itemObj.info.innerHTML =
 						'<span class="result-label">候选目标</span>' +
 						buildCopyableTarget(target) +
-						'<span class="result-detail">无法通过该代理访问 Cloudflare，请更换目标后重试。</span>';
+						'<span class="result-detail">无法通过该代理访问 api.ipapi.is，请更换目标后重试。</span>';
 					itemObj.meta.innerHTML =
 						buildMetaChip('检测未通过', 'error', 'meta-chip-danger') +
 						buildMetaChip(data.error || data.message || '远端返回失败结果', 'info');
