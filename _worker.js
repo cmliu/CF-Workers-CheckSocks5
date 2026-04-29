@@ -4366,6 +4366,7 @@ function generateHTML(备案内容) {
 		let resultRecords = [];
 		let activePrimaryFilter = 'all';
 		let activeProtocolFilters = getDefaultProtocolFilters();
+		let protocolFilterCounts = getDefaultProtocolFilterCounts();
 		let activeCountryFilter = 'all';
 		let isFilterPanelExpanded = false;
 		let isCreatingResultBatch = false;
@@ -5361,14 +5362,29 @@ function generateHTML(备案内容) {
 			resultRecords = [];
 			activePrimaryFilter = 'all';
 			activeProtocolFilters = getDefaultProtocolFilters();
+			protocolFilterCounts = getDefaultProtocolFilterCounts();
 			activeCountryFilter = 'all';
 			isFilterPanelExpanded = false;
 			updateResultFilters();
 		}
 
 		function getDefaultProtocolFilters() {
+			return [];
+		}
+
+		function getDefaultProtocolFilterCounts() {
+			const counts = {};
+			PROTOCOL_RESULT_FILTERS.forEach(function (filter) {
+				counts[filter.key] = 0;
+			});
+			return counts;
+		}
+
+		function getOrderedProtocolFilters(filters) {
 			return PROTOCOL_RESULT_FILTERS.map(function (filter) {
 				return filter.key;
+			}).filter(function (key) {
+				return filters.includes(key);
 			});
 		}
 
@@ -5555,6 +5571,34 @@ function generateHTML(备案内容) {
 			});
 		}
 
+		function getProtocolFilterCounts(records) {
+			const counts = getDefaultProtocolFilterCounts();
+			records.forEach(function (record) {
+				if (Object.prototype.hasOwnProperty.call(counts, record.proxyType)) {
+					counts[record.proxyType]++;
+				}
+			});
+			return counts;
+		}
+
+		function syncProtocolFiltersWithCounts(counts) {
+			const nextActive = activeProtocolFilters.filter(function (key) {
+				return (counts[key] || 0) > 0;
+			});
+
+			PROTOCOL_RESULT_FILTERS.forEach(function (filter) {
+				const key = filter.key;
+				const previousCount = protocolFilterCounts[key] || 0;
+				const currentCount = counts[key] || 0;
+				if (previousCount === 0 && currentCount > 0 && !nextActive.includes(key)) {
+					nextActive.push(key);
+				}
+			});
+
+			activeProtocolFilters = getOrderedProtocolFilters(nextActive);
+			protocolFilterCounts = counts;
+		}
+
 		function doesRecordMatchProtocolFilter(record, protocolKey) {
 			return record.proxyType === protocolKey;
 		}
@@ -5574,9 +5618,7 @@ function generateHTML(备案内容) {
 			const nextFilters = activeProtocolFilters.includes(protocolKey)
 				? activeProtocolFilters.filter(function (key) { return key !== protocolKey; })
 				: activeProtocolFilters.concat(protocolKey);
-			activeProtocolFilters = PROTOCOL_RESULT_FILTERS
-				.map(function (filter) { return filter.key; })
-				.filter(function (key) { return nextFilters.includes(key); });
+			activeProtocolFilters = getOrderedProtocolFilters(nextFilters);
 		}
 
 		function getCountryFilterOptions(baseRecords, filterKey) {
@@ -5699,10 +5741,10 @@ function generateHTML(备案内容) {
 			}).join('');
 
 			const primaryRecords = getPrimaryFilteredRecords(activePrimaryFilter);
+			const protocolCounts = getProtocolFilterCounts(primaryRecords);
+			syncProtocolFiltersWithCounts(protocolCounts);
 			protocolFilterGroup.innerHTML = PROTOCOL_RESULT_FILTERS.map(function (filter) {
-				const count = primaryRecords.filter(function (record) {
-					return doesRecordMatchProtocolFilter(record, filter.key);
-				}).length;
+				const count = protocolCounts[filter.key] || 0;
 				const isActive = activeProtocolFilters.includes(filter.key);
 				return renderFilterChip('protocol-filter', filter.key, filter.label, count, isActive, count === 0 && !isActive);
 			}).join('');
