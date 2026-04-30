@@ -169,7 +169,7 @@ export default {
 						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port, /check?turn=host:port, /check?sstp=host:port or /check?proxy=socks5://host:port'
 					}, { status: 400, origin });
 				}
-				const result = await checkProxy(checkParams, request.cf.colo);
+				const result = await checkProxy(checkParams, request.cf?.colo ?? null);
 				return jsonResponse(result, { origin });
 			}
 
@@ -354,7 +354,7 @@ async function checkProxy({ type, value }, colo) {
 	}
 }
 
-function buildCheckResult({ type, rawValue, proxy, success, colo = 'CF', exit = null, error = null, responseTime }) {
+function buildCheckResult({ type, rawValue, proxy, success, colo = null, exit = null, error = null, responseTime }) {
 	const candidate = proxy ? formatProxyAuthority(proxy) : stripProxyScheme(rawValue);
 	const result = {
 		candidate,
