@@ -255,8 +255,13 @@ https://your-worker.example.workers.dev/socks5://proxy.example.com:1080
 
 本项目基于 [GNU General Public License v3.0](./LICENSE) 发布。
 
+## 开源代码引用
+- [CF-Workers-HTTPS](https://github.com/ToiCF/CF-Workers-HTTPS)
+- [CF-Workers-TURN](https://github.com/ToiCF/CF-Workers-TURN)
+- [CF-Workers-SoftEther](https://github.com/ToiCF/CF-Workers-SoftEther)
+
 ## 致谢
-- [@Alexandre_Kojeve](https://t.me/Enkelte_notif/821)
+- [@Alexandre_Kojeve](https://t.me/Alexandre_Kojeve)
 - [Cloudflare Workers](https://workers.cloudflare.com/)
 - [ipapi.is](https://ipapi.is/)
 - [Cloudflare DNS](https://cloudflare-dns.com/)

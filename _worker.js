@@ -169,7 +169,7 @@ export default {
 						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port, /check?turn=host:port, /check?sstp=host:port or /check?proxy=socks5://host:port'
 					}, { status: 400, origin });
 				}
-				const result = await checkProxy(checkParams);
+				const result = await checkProxy(checkParams, request.cf.colo);
 				return jsonResponse(result, { origin });
 			}
 
@@ -213,7 +213,7 @@ function jsonResponse(data, { status = 200, origin = '' } = {}) {
 	});
 }
 
-async function checkProxy({ type, value }) {
+async function checkProxy({ type, value }, colo) {
 	const startedAt = Date.now();
 	let proxy;
 
@@ -225,6 +225,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy: null,
 			success: false,
+			colo: colo,
 			error: error.message,
 			responseTime: Date.now() - startedAt
 		});
@@ -334,6 +335,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy,
 			success: true,
+			colo: colo,
 			exit,
 			responseTime: Date.now() - startedAt
 		});
@@ -343,6 +345,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy,
 			success: false,
+			colo: colo,
 			error: error?.message || String(error),
 			responseTime: Date.now() - startedAt
 		});
@@ -351,7 +354,7 @@ async function checkProxy({ type, value }) {
 	}
 }
 
-function buildCheckResult({ type, rawValue, proxy, success, exit = null, error = null, responseTime }) {
+function buildCheckResult({ type, rawValue, proxy, success, colo = 'CF', exit = null, error = null, responseTime }) {
 	const candidate = proxy ? formatProxyAuthority(proxy) : stripProxyScheme(rawValue);
 	const result = {
 		candidate,
@@ -362,6 +365,7 @@ function buildCheckResult({ type, rawValue, proxy, success, exit = null, error =
 		port: proxy?.port ?? null,
 		link: proxy ? `${proxy.type}://${formatProxyAuthority(proxy)}` : `${type}://${candidate}`,
 		success,
+		colo,
 		responseTime
 	};
 	if (success) result.exit = exit;
@@ -1007,7 +1011,7 @@ function createSstpClient(proxy) {
 	};
 
 	const readHttpLine = async () => {
-		for (;;) {
+		for (; ;) {
 			const lineEnd = bufferedBytes.indexOf(10);
 			if (lineEnd >= 0) {
 				const line = decoder.decode(bufferedBytes.subarray(0, lineEnd));
@@ -1161,7 +1165,7 @@ function createSstpClient(proxy) {
 		)), CONNECT_TIMEOUT_MS, 'SSTP HTTP handshake request timed out');
 
 		const statusLine = await withTimeout(readHttpLine(), CONNECT_TIMEOUT_MS, 'SSTP HTTP handshake timed out');
-		for (;;) {
+		for (; ;) {
 			const line = await withTimeout(readHttpLine(), CONNECT_TIMEOUT_MS, 'SSTP HTTP header read timed out');
 			if (line === '') break;
 		}
@@ -1443,7 +1447,7 @@ async function sstpConnect(proxy, targetHost, targetPort) {
 					sstp.writer.write(tcp.buildTcpFrame(0x10)).catch(() => { });
 				};
 
-				for (;;) {
+				for (; ;) {
 					const packet = await sstp.readPacket(60000);
 					if (packet.isControl) continue;
 
