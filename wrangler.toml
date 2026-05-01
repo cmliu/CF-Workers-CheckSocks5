@@ -1,0 +1,13 @@
+name = "cf-workers-check-socks5"
+main = "./_worker.js"
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# Optional: bind a custom domain route instead of *.workers.dev
+# routes = [
+#   { pattern = "check.example.com/*", zone_name = "example.com" }
+# ]
+
+# Optional: override the footer HTML exposed as env.BEIAN in the Worker
+# [vars]
+# BEIAN = "Example footer HTML"

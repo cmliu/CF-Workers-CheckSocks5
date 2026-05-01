@@ -169,9 +169,9 @@ export default {
 						error: 'Missing proxy parameter. Use /check?socks5=host:port, /check?http=host:port, /check?https=host:port, /check?turn=host:port, /check?sstp=host:port or /check?proxy=socks5://host:port'
 					}, { status: 400, origin });
 				}
-				const result = await checkProxy(checkParams);
+				const result = await checkProxy(checkParams, request.cf?.colo ?? null);
 				return jsonResponse(result, { origin });
-			}
+			} else if (url.pathname === '/locations') return fetch(new Request('https://speed.cloudflare.com/locations', { headers: { 'Referer': 'https://speed.cloudflare.com/' } }));
 
 			return new Response(generateHTML(备案内容), {
 				headers: {
@@ -213,7 +213,7 @@ function jsonResponse(data, { status = 200, origin = '' } = {}) {
 	});
 }
 
-async function checkProxy({ type, value }) {
+async function checkProxy({ type, value }, colo) {
 	const startedAt = Date.now();
 	let proxy;
 
@@ -225,6 +225,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy: null,
 			success: false,
+			colo: colo,
 			error: error.message,
 			responseTime: Date.now() - startedAt
 		});
@@ -334,6 +335,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy,
 			success: true,
+			colo: colo,
 			exit,
 			responseTime: Date.now() - startedAt
 		});
@@ -343,6 +345,7 @@ async function checkProxy({ type, value }) {
 			rawValue: value,
 			proxy,
 			success: false,
+			colo: colo,
 			error: error?.message || String(error),
 			responseTime: Date.now() - startedAt
 		});
@@ -351,7 +354,7 @@ async function checkProxy({ type, value }) {
 	}
 }
 
-function buildCheckResult({ type, rawValue, proxy, success, exit = null, error = null, responseTime }) {
+function buildCheckResult({ type, rawValue, proxy, success, colo = null, exit = null, error = null, responseTime }) {
 	const candidate = proxy ? formatProxyAuthority(proxy) : stripProxyScheme(rawValue);
 	const result = {
 		candidate,
@@ -362,6 +365,7 @@ function buildCheckResult({ type, rawValue, proxy, success, exit = null, error =
 		port: proxy?.port ?? null,
 		link: proxy ? `${proxy.type}://${formatProxyAuthority(proxy)}` : `${type}://${candidate}`,
 		success,
+		colo,
 		responseTime
 	};
 	if (success) result.exit = exit;
@@ -1007,7 +1011,7 @@ function createSstpClient(proxy) {
 	};
 
 	const readHttpLine = async () => {
-		for (;;) {
+		for (; ;) {
 			const lineEnd = bufferedBytes.indexOf(10);
 			if (lineEnd >= 0) {
 				const line = decoder.decode(bufferedBytes.subarray(0, lineEnd));
@@ -1161,7 +1165,7 @@ function createSstpClient(proxy) {
 		)), CONNECT_TIMEOUT_MS, 'SSTP HTTP handshake request timed out');
 
 		const statusLine = await withTimeout(readHttpLine(), CONNECT_TIMEOUT_MS, 'SSTP HTTP handshake timed out');
-		for (;;) {
+		for (; ;) {
 			const line = await withTimeout(readHttpLine(), CONNECT_TIMEOUT_MS, 'SSTP HTTP header read timed out');
 			if (line === '') break;
 		}
@@ -1443,7 +1447,7 @@ async function sstpConnect(proxy, targetHost, targetPort) {
 					sstp.writer.write(tcp.buildTcpFrame(0x10)).catch(() => { });
 				};
 
-				for (;;) {
+				for (; ;) {
 					const packet = await sstp.readPacket(60000);
 					if (packet.isControl) continue;
 
@@ -2493,8 +2497,103 @@ function generateHTML(备案内容) {
 		}
 
 		.side-card {
-			padding: 26px;
+			padding: 30px;
 			min-height: 100%;
+		}
+
+		.summary-card {
+			position: relative;
+			overflow: hidden;
+			isolation: isolate;
+		}
+
+		.summary-card > * {
+			position: relative;
+			z-index: 1;
+		}
+
+		.summary-top {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 18px;
+		}
+
+		.summary-copy {
+			flex: 1 1 auto;
+			min-width: 0;
+		}
+
+		.summary-backend {
+			display: flex;
+			justify-content: flex-end;
+			flex: 0 0 auto;
+			max-width: 240px;
+		}
+
+		.summary-backend-badge {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			padding: 10px 14px;
+			font-size: 0.75rem;
+			font-weight: 700;
+			line-height: 1.45;
+			backdrop-filter: blur(14px);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+			white-space: normal;
+			text-align: left;
+		}
+
+		.summary-backend-badge::before {
+			content: '';
+			width: 8px;
+			height: 8px;
+			border-radius: 999px;
+			flex: 0 0 auto;
+			background: currentColor;
+			opacity: 0.9;
+		}
+
+		.summary-backend-badge.state-loading {
+			background: rgba(97, 219, 255, 0.08);
+			border-color: rgba(97, 219, 255, 0.18);
+			color: #9feaff;
+		}
+
+		.summary-backend-badge.state-ready {
+			background: rgba(16, 185, 129, 0.14);
+			border-color: rgba(52, 211, 153, 0.28);
+			color: #b7f7d0;
+		}
+
+		.summary-backend-badge.state-error {
+			background: rgba(239, 68, 68, 0.12);
+			border-color: rgba(248, 113, 113, 0.22);
+			color: #fecaca;
+		}
+
+		.summary-flag-overlay {
+			position: absolute;
+			top: 68px;
+			right: -18px;
+			width: 156px;
+			height: 104px;
+			border-radius: 28px;
+			background-position: center;
+			background-repeat: no-repeat;
+			background-size: cover;
+			opacity: 0;
+			filter: blur(13px) saturate(1.08);
+			transform: rotate(7deg) scale(1.18);
+			transform-origin: top right;
+			pointer-events: none;
+			z-index: 0;
+			transition: opacity 0.24s ease;
+		}
+
+		.summary-card.has-backend-flag .summary-flag-overlay {
+			opacity: 0.18;
 		}
 
 		.summary-description {
@@ -3495,6 +3594,18 @@ function generateHTML(备案内容) {
 			color: #0f5f8e;
 		}
 
+		html[data-theme='light'] .summary-backend-badge.state-ready {
+			background: rgba(16, 185, 129, 0.12);
+			border-color: rgba(5, 150, 105, 0.22);
+			color: #0f766e;
+		}
+
+		html[data-theme='light'] .summary-backend-badge.state-error {
+			background: rgba(239, 68, 68, 0.1);
+			border-color: rgba(220, 38, 38, 0.18);
+			color: #b91c1c;
+		}
+
 		html[data-theme='light'] .field-label {
 			color: #17324a;
 		}
@@ -3954,6 +4065,18 @@ function generateHTML(备案内容) {
 				align-items: stretch;
 			}
 
+			.summary-backend {
+				flex-direction: column;
+				align-items: stretch;
+				max-width: none;
+				width: 100%;
+			}
+
+			.summary-backend-badge {
+				width: 100%;
+				justify-content: flex-start;
+			}
+
 			.control-panel,
 			.side-card,
 			.results-shell {
@@ -4124,10 +4247,18 @@ function generateHTML(备案内容) {
 				</div>
 
 				<aside class="side-column">
-					<div class="surface-card side-card">
-						<p class="section-kicker">Summary</p>
-						<h3 class="summary-title" id="summaryHeadline">等待输入</h3>
-						<p class="summary-description" id="summaryDescription">实时统计和检测概览。</p>
+					<div class="surface-card side-card summary-card" id="summaryCard">
+						<div class="summary-flag-overlay" id="summaryFlagOverlay" aria-hidden="true"></div>
+						<div class="summary-top">
+							<div class="summary-copy">
+								<p class="section-kicker">Summary</p>
+								<h3 class="summary-title" id="summaryHeadline">等待输入</h3>
+								<p class="summary-description" id="summaryDescription">实时统计和检测概览。</p>
+							</div>
+							<div class="summary-backend">
+								<span class="panel-badge summary-backend-badge state-loading" id="summaryBackendBadge">验证服务定位中...</span>
+							</div>
+						</div>
 						<div id="progressContainer" class="progress-container">
 							<div class="progress-head">
 								<span>检测进度</span>
@@ -4242,8 +4373,11 @@ function generateHTML(备案内容) {
 		const historyDropdown = document.getElementById('historyDropdown');
 		const fieldHint = document.getElementById('fieldHint');
 		const modeLabel = document.getElementById('modeLabel');
+		const summaryCard = document.getElementById('summaryCard');
+		const summaryFlagOverlay = document.getElementById('summaryFlagOverlay');
 		const summaryHeadline = document.getElementById('summaryHeadline');
 		const summaryDescription = document.getElementById('summaryDescription');
+		const summaryBackendBadge = document.getElementById('summaryBackendBadge');
 		const statTotal = document.getElementById('statTotal');
 		const statSuccess = document.getElementById('statSuccess');
 		const statPending = document.getElementById('statPending');
@@ -4274,6 +4408,9 @@ function generateHTML(备案内容) {
 		let map = null;
 		let mapLayers = [];
 		let redLocationIcon = null;
+		let cfLocationIndex = new Map();
+		let cfLocationsPromise = null;
+		let backendServicePromise = null;
 		let mapRenderToken = 0;
 		let totalTargets = 0;
 		let completedCount = 0;
@@ -4466,6 +4603,140 @@ function generateHTML(备案内容) {
 			}
 
 			return null;
+		}
+
+		async function loadCfLocations() {
+			if (cfLocationsPromise) {
+				return cfLocationsPromise;
+			}
+
+			cfLocationsPromise = fetch('/locations')
+				.then(function (response) {
+					if (!response.ok) {
+						throw new Error('Failed to load /locations: ' + response.status);
+					}
+					return response.json();
+				})
+				.then(function (payload) {
+					const nextIndex = new Map();
+					if (Array.isArray(payload)) {
+						payload.forEach(function (entry) {
+							const code = normalizeColoCode(entry?.iata);
+							const lat = Number(entry?.lat);
+							const lon = Number(entry?.lon);
+							if (!code || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+								return;
+							}
+							nextIndex.set(code, {
+								code: code,
+								lat: lat,
+								lon: lon,
+								city: String(entry?.city || '').trim(),
+								region: String(entry?.region || '').trim(),
+								country: String(entry?.cca2 || '').trim()
+							});
+						});
+					}
+					cfLocationIndex = nextIndex;
+					return nextIndex;
+				})
+				.catch(function (error) {
+					console.error('Failed to preload Cloudflare locations', error);
+					return cfLocationIndex;
+				});
+
+			return cfLocationsPromise;
+		}
+
+		function getCfLocation(coloCode) {
+			const normalizedCode = normalizeColoCode(coloCode);
+			if (!normalizedCode) {
+				return null;
+			}
+
+			const location = cfLocationIndex.get(normalizedCode);
+			return location ? {
+				code: location.code,
+				lat: location.lat,
+				lon: location.lon,
+				city: location.city,
+				region: location.region,
+				country: location.country
+			} : null;
+		}
+
+		function setSummaryBackendStatus(text, state, titleText) {
+			if (!summaryBackendBadge) return;
+			summaryBackendBadge.innerText = text;
+			summaryBackendBadge.className = 'panel-badge summary-backend-badge state-' + (state || 'loading');
+			if (titleText) {
+				summaryBackendBadge.title = titleText;
+			} else {
+				summaryBackendBadge.removeAttribute('title');
+			}
+		}
+
+		function updateSummaryBackendFlag(flagUrl) {
+			if (!summaryCard || !summaryFlagOverlay) return;
+
+			if (flagUrl) {
+				summaryCard.classList.add('has-backend-flag');
+				summaryFlagOverlay.style.backgroundImage = 'url("' + flagUrl + '")';
+				return;
+			}
+
+			summaryCard.classList.remove('has-backend-flag');
+			summaryFlagOverlay.style.backgroundImage = '';
+		}
+
+		async function loadBackendServiceInfo() {
+			if (backendServicePromise) {
+				return backendServicePromise;
+			}
+
+			setSummaryBackendStatus('验证服务定位中...', 'loading');
+
+			backendServicePromise = Promise.all([
+				loadCfLocations(),
+				fetchTextWithTimeout('/cdn-cgi/trace', { cache: 'no-store' }, 8000)
+			]).then(function (results) {
+				const traceResult = results[1];
+				const payload = parseTracePayload(traceResult?.payload);
+
+				if (!traceResult?.response?.ok) {
+					throw new Error('Failed to load backend trace: ' + traceResult?.response?.status);
+				}
+
+				const coloCode = normalizeColoCode(payload?.colo);
+				const cfLocation = getCfLocation(coloCode);
+				const countryCode = String(cfLocation?.country || '').trim().toUpperCase();
+				const city = String(cfLocation?.city || '').trim();
+				const locationLabel = [countryCode, city].filter(Boolean).join(' · ');
+				const statusLabel = [countryCode, coloCode].filter(Boolean).join(' · ') || city || '未知位置';
+				const titleText = '当前实际由 Cloudflare '
+					+ (coloCode || '未知')
+					+ ' 机房'
+					+ (locationLabel ? '（' + locationLabel + '）' : '')
+					+ ' 的验证后端发起连通性测试。若被测试对象距离该测试后端过远，可能因网络延迟过高或连接超时而误报为不可用，这并不一定代表该目标在你的实际使用环境中同样不可用。';
+
+				setSummaryBackendStatus(statusLabel + ' 服务已就绪', 'ready', titleText);
+				updateSummaryBackendFlag(getFlagUrlFromCountryCode(countryCode));
+
+				return {
+					colo: coloCode,
+					countryCode: countryCode,
+					city: city,
+					host: String(payload?.h || '').trim(),
+					ip: String(payload?.ip || '').trim()
+				};
+			}).catch(function (error) {
+				console.error('Failed to load backend service info', error);
+				setSummaryBackendStatus('验证服务定位失败', 'error', error?.message || '');
+				updateSummaryBackendFlag('');
+				return null;
+			});
+
+			return backendServicePromise;
 		}
 
 		function clearMapLayers() {
@@ -5097,6 +5368,51 @@ function generateHTML(备案内容) {
 				window.clearTimeout(timer);
 				if (signal) signal.removeEventListener('abort', abortFromSignal);
 			}
+		}
+
+		async function fetchTextWithTimeout(resource, options, timeoutMs, signal) {
+			const controller = new AbortController();
+			const timer = window.setTimeout(function () {
+				controller.abort();
+			}, timeoutMs);
+			const abortFromSignal = function () {
+				controller.abort();
+			};
+			if (signal) {
+				if (signal.aborted) controller.abort();
+				else signal.addEventListener('abort', abortFromSignal, { once: true });
+			}
+
+			try {
+				const response = await fetch(resource, Object.assign({}, options || {}, {
+					signal: controller.signal
+				}));
+				const payload = await response.text();
+				return { response, payload };
+			} finally {
+				window.clearTimeout(timer);
+				if (signal) signal.removeEventListener('abort', abortFromSignal);
+			}
+		}
+
+		function parseTracePayload(text) {
+			const payload = {};
+			const lines = String(text || '').replace(/\\r/g, '').split('\\n');
+
+			lines.forEach(function (line) {
+				const separatorIndex = line.indexOf('=');
+				if (separatorIndex <= 0) {
+					return;
+				}
+
+				const key = line.slice(0, separatorIndex).trim();
+				const value = line.slice(separatorIndex + 1).trim();
+				if (key) {
+					payload[key] = value;
+				}
+			});
+
+			return payload;
 		}
 
 		function updateResolveBatchProgress(batchIndex, totalBatches, attempt) {
@@ -6210,11 +6526,18 @@ function generateHTML(备案内容) {
 			return '';
 		}
 
+		function getFlagUrlFromCountryCode(countryCode) {
+			const normalized = String(countryCode || '').trim().toLowerCase();
+			return /^[a-z]{2}$/.test(normalized)
+				? 'https://ipdata.co/flags/' + normalized + '.png'
+				: '';
+		}
+
 		function getFlagUrlFromExitIps(exitIps) {
 			for (const entry of exitIps) {
 				const countryCode = getExitCountryCode(entry.exitData);
 				if (countryCode) {
-					return 'https://ipdata.co/flags/' + countryCode + '.png';
+					return getFlagUrlFromCountryCode(countryCode);
 				}
 			}
 
@@ -6781,6 +7104,8 @@ function generateHTML(备案内容) {
 			bindInputShortcut();
 			renderDashboard();
 			updateResultFilters();
+			loadCfLocations();
+			loadBackendServiceInfo();
 
 			const path = window.location.pathname.slice(1);
 			if (path && path.length > 3) {
