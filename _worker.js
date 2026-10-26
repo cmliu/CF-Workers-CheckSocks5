@@ -1,4 +1,4 @@
-﻿import { connect } from 'cloudflare:sockets';
+import { connect } from 'cloudflare:sockets';
 
 const CHECK_TIMEOUT_MS = 12000;
 const CONNECT_TIMEOUT_MS = 9999;
@@ -2465,6 +2465,38 @@ function generateHTML(备案内容) {
 			box-shadow: 0 24px 42px rgba(239, 68, 68, 0.34);
 		}
 
+		.primary-btn.is-pause {
+			background: linear-gradient(135deg, #f59e0b, #fbbf24);
+			color: #2f1f02;
+			box-shadow: 0 18px 34px rgba(245, 158, 11, 0.26);
+		}
+
+		.primary-btn.is-pause small {
+			color: rgba(47, 31, 2, 0.76);
+		}
+
+		.primary-btn.is-pause:hover {
+			box-shadow: 0 24px 42px rgba(245, 158, 11, 0.34);
+		}
+
+		.primary-btn.is-pause.is-resume {
+			background: linear-gradient(135deg, #10b981, #34d399);
+			color: #04261c;
+			box-shadow: 0 18px 34px rgba(16, 185, 129, 0.26);
+		}
+
+		.primary-btn.is-pause.is-resume small {
+			color: rgba(4, 38, 28, 0.76);
+		}
+
+		.primary-btn.is-pause.is-resume:hover {
+			box-shadow: 0 24px 42px rgba(16, 185, 129, 0.34);
+		}
+
+		.primary-btn[hidden] {
+			display: none !important;
+		}
+
 		.primary-btn:disabled {
 			cursor: wait;
 			transform: none;
@@ -2679,6 +2711,12 @@ function generateHTML(备案内容) {
 			background: rgba(251, 191, 36, 0.12);
 			border-color: rgba(251, 191, 36, 0.22);
 			color: #ffd97d;
+		}
+
+		.results-pill.state-paused {
+			background: rgba(251, 191, 36, 0.14);
+			border-color: rgba(251, 191, 36, 0.28);
+			color: #fde68a;
 		}
 
 		.results-pill.state-running {
@@ -3855,6 +3893,22 @@ function generateHTML(备案内容) {
 			box-shadow: 0 22px 40px rgba(225, 29, 72, 0.24);
 		}
 
+		html[data-theme='light'] .primary-btn.is-pause {
+			box-shadow: 0 18px 34px rgba(245, 158, 11, 0.18);
+		}
+
+		html[data-theme='light'] .primary-btn.is-pause:hover {
+			box-shadow: 0 22px 40px rgba(245, 158, 11, 0.24);
+		}
+
+		html[data-theme='light'] .primary-btn.is-pause.is-resume {
+			box-shadow: 0 18px 34px rgba(16, 185, 129, 0.18);
+		}
+
+		html[data-theme='light'] .primary-btn.is-pause.is-resume:hover {
+			box-shadow: 0 22px 40px rgba(16, 185, 129, 0.24);
+		}
+
 		html[data-theme='light'] .results-pill {
 			border-color: rgba(95, 123, 150, 0.16);
 			background: rgba(255, 255, 255, 0.72);
@@ -3869,6 +3923,12 @@ function generateHTML(备案内容) {
 			background: rgba(245, 158, 11, 0.12);
 			border-color: rgba(245, 158, 11, 0.18);
 			color: #9a6706;
+		}
+
+		html[data-theme='light'] .results-pill.state-paused {
+			background: rgba(245, 158, 11, 0.14);
+			border-color: rgba(245, 158, 11, 0.24);
+			color: #b45309;
 		}
 
 		html[data-theme='light'] .results-pill.state-running {
@@ -4423,6 +4483,11 @@ function generateHTML(备案内容) {
 							</label>
 						</div>
 
+						<button class="primary-btn is-pause" id="pauseBtn" type="button" hidden>
+							<span>暂停检测</span>
+							<small>Pause</small>
+						</button>
+
 						<button class="primary-btn" id="checkBtn" type="button">
 							<span>开始检测</span>
 							<small>Resolve + Check</small>
@@ -4547,6 +4612,7 @@ function generateHTML(备案内容) {
 	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 	<script>
 		const checkBtn = document.getElementById('checkBtn');
+		const pauseBtn = document.getElementById('pauseBtn');
 		let inputList = document.getElementById('inputList');
 		const inputContainer = document.getElementById('inputContainer');
 		const batchMode = document.getElementById('batchMode');
@@ -5495,8 +5561,102 @@ function generateHTML(备案内容) {
 			return !run || run.cancelled || run.controller.signal.aborted || activeRun !== run;
 		}
 
+		function isRunPaused(run) {
+			return Boolean(run && run.paused && !isRunStopped(run));
+		}
+
+		function getRunActiveSignal(run) {
+			return run?.activeController ? run.activeController.signal : run?.controller?.signal;
+		}
+
 		function throwIfRunStopped(run) {
 			if (isRunStopped(run)) throw makeAbortError();
+		}
+
+		function waitForRunIfPaused(run) {
+			if (!isRunPaused(run)) return Promise.resolve();
+			return new Promise(function (resolve) {
+				run.resumeResolvers.push(resolve);
+			});
+		}
+
+		function updatePendingRecordsForPause(isPaused) {
+			resultRecords.forEach(function (record) {
+				if (!record || record.status !== 'pending' || !record.el) return;
+				const badge = record.el.querySelector('.status-badge');
+				const detail = record.el.querySelector('.result-detail');
+				const meta = record.el.querySelector('.result-meta');
+				if (badge) {
+					badge.className = 'status-badge status-pending';
+					badge.innerText = isPaused ? '已暂停' : '等待中';
+				}
+				if (detail) {
+					detail.innerText = isPaused
+						? '检测已暂停，点击“继续检测”后将继续验证该目标。'
+						: '已加入检测队列，正在等待返回结果。';
+				}
+				if (meta) {
+					meta.innerHTML = buildMetaChip(isPaused ? '队列已暂停' : '准备建立检测请求', 'prep');
+				}
+			});
+		}
+
+		function markPendingRecordsStopped() {
+			resultRecords.forEach(function (record) {
+				if (!record || record.status !== 'pending' || !record.el) return;
+				record.status = 'stopped';
+				const badge = record.el.querySelector('.status-badge');
+				const detail = record.el.querySelector('.result-detail');
+				const meta = record.el.querySelector('.result-meta');
+				if (badge) {
+					badge.className = 'status-badge status-error';
+					badge.innerText = '已停止';
+				}
+				if (detail) {
+					detail.innerText = '检测已手动停止，未继续请求该代理。';
+				}
+				if (meta) {
+					meta.innerHTML = buildMetaChip('已停止', 'info');
+				}
+			});
+		}
+
+		function setPauseButtonState(isRunning, isPaused) {
+			if (!pauseBtn) return;
+			pauseBtn.hidden = !isRunning;
+			pauseBtn.disabled = !isRunning;
+			const label = pauseBtn.querySelector('span');
+			const hint = pauseBtn.querySelector('small');
+			pauseBtn.classList.toggle('is-resume', Boolean(isPaused));
+			if (label) label.innerText = isPaused ? '继续检测' : '暂停检测';
+			if (hint) hint.innerText = isPaused ? 'Resume' : 'Pause';
+		}
+
+		function togglePauseActiveRun() {
+			if (!activeRun || isRunStopped(activeRun)) return;
+			activeRun.paused = !activeRun.paused;
+			setPauseButtonState(true, activeRun.paused);
+
+			if (activeRun.paused) {
+				try { activeRun.activeController?.abort(); } catch (e) { }
+				updatePendingRecordsForPause(true);
+				progressText.innerText = totalTargets > 0
+					? '已暂停 · ' + completedCount + ' / ' + totalTargets
+					: '解析已暂停';
+				setAppState('paused');
+			} else {
+				activeRun.activeController = new AbortController();
+				updatePendingRecordsForPause(false);
+				const resolvers = activeRun.resumeResolvers.splice(0);
+				resolvers.forEach(function (resolve) { resolve(); });
+				if (totalTargets > 0) {
+					setAppState('running');
+					updateProgress();
+				} else {
+					progressText.innerText = '正在解析目标...';
+					setAppState('resolving');
+				}
+			}
 		}
 
 		function setCheckButtonRunning(isRunning) {
@@ -5506,14 +5666,22 @@ function generateHTML(备案内容) {
 			checkBtn.classList.toggle('is-stop', isRunning);
 			if (label) label.innerText = isRunning ? '停止检测' : '开始检测';
 			if (hint) hint.innerText = isRunning ? 'Stop' : 'Resolve + Check';
+			setPauseButtonState(isRunning, activeRun ? activeRun.paused : false);
 		}
 
 		function stopActiveRun() {
 			if (!activeRun || isRunStopped(activeRun)) return;
 			activeRun.cancelled = true;
+			activeRun.paused = false;
+			try { activeRun.activeController?.abort(); } catch (e) { }
 			activeRun.controller.abort();
+			markPendingRecordsStopped();
+			const resolvers = activeRun.resumeResolvers ? activeRun.resumeResolvers.splice(0) : [];
+			resolvers.forEach(function (resolve) { resolve(); });
+			setPauseButtonState(false, false);
 			progressText.innerText = '正在停止检测...';
 			setAppState('stopped');
+			updateResultFilters();
 		}
 
 		function splitIntoChunks(items, size) {
@@ -5641,7 +5809,7 @@ function generateHTML(备案内容) {
 					'Content-Type': 'application/json'
 				},
 				body: JSON.stringify(payload)
-			}, RESOLVE_BATCH_TIMEOUT_MS, run?.controller.signal);
+			}, RESOLVE_BATCH_TIMEOUT_MS, getRunActiveSignal(run));
 
 			if (!result.response.ok) {
 				const errorMessage = result.payload && result.payload.error
@@ -5655,6 +5823,7 @@ function generateHTML(备案内容) {
 
 		async function resolveBatchWithRetry(batch, batchIndex, totalBatches, run) {
 			for (let attempt = 1; attempt <= RESOLVE_BATCH_MAX_ATTEMPTS; attempt++) {
+				await waitForRunIfPaused(run);
 				throwIfRunStopped(run);
 				updateResolveBatchProgress(batchIndex, totalBatches, attempt);
 
@@ -5663,6 +5832,10 @@ function generateHTML(备案内容) {
 					return true;
 				} catch (error) {
 					if (isRunStopped(run)) throw error;
+					if (isRunPaused(run)) {
+						attempt--;
+						continue;
+					}
 					const label = error && error.name === 'AbortError'
 						? 'Resolve batch timeout'
 						: 'Resolve batch error';
@@ -5684,6 +5857,7 @@ function generateHTML(备案内容) {
 			let failedBatchCount = 0;
 
 			for (let index = 0; index < batches.length; index++) {
+				await waitForRunIfPaused(run);
 				throwIfRunStopped(run);
 				const resolved = await resolveBatchWithRetry(batches[index], index + 1, batches.length, run);
 				if (!resolved) {
@@ -5698,9 +5872,10 @@ function generateHTML(备案内容) {
 
 		async function resolveSingleJob(job, run) {
 			for (let attempt = 1; attempt <= RESOLVE_BATCH_MAX_ATTEMPTS; attempt++) {
+				await waitForRunIfPaused(run);
 				throwIfRunStopped(run);
 				try {
-					const result = await fetchJsonWithTimeout('/resolve?proxyip=' + encodeURIComponent(job.line), {}, RESOLVE_BATCH_TIMEOUT_MS, run?.controller.signal);
+					const result = await fetchJsonWithTimeout('/resolve?proxyip=' + encodeURIComponent(job.line), {}, RESOLVE_BATCH_TIMEOUT_MS, getRunActiveSignal(run));
 					if (!result.response.ok) {
 						console.error('Resolve error for', job.line, result.payload || result.response.status);
 						return false;
@@ -5714,6 +5889,10 @@ function generateHTML(备案内容) {
 					return true;
 				} catch (error) {
 					if (isRunStopped(run)) throw error;
+					if (isRunPaused(run)) {
+						attempt--;
+						continue;
+					}
 					if (attempt >= RESOLVE_BATCH_MAX_ATTEMPTS) {
 						console.error('Resolve timeout for', job.line, error);
 						return false;
@@ -5726,22 +5905,36 @@ function generateHTML(备案内容) {
 		}
 
 		async function runWithConcurrency(items, limit, worker, run) {
-			let nextIndex = 0;
-			const workerCount = Math.min(Math.max(Number(limit) || 1, 1), items.length);
-			const runners = [];
+			const queue = items.map(function (_, index) { return index; });
 
-			async function runNext() {
-				while (nextIndex < items.length && !isRunStopped(run)) {
-					const currentIndex = nextIndex++;
-					await worker(items[currentIndex], currentIndex);
+			while (queue.length > 0 && !isRunStopped(run)) {
+				await waitForRunIfPaused(run);
+				if (isRunStopped(run)) break;
+
+				const workerCount = Math.min(Math.max(Number(limit) || 1, 1), queue.length);
+				const runners = [];
+
+				async function runNext() {
+					while (!isRunStopped(run)) {
+						await waitForRunIfPaused(run);
+						if (isRunStopped(run)) break;
+						if (!queue.length) break;
+						const currentIndex = queue.shift();
+						if (currentIndex === undefined) break;
+						const completed = await worker(items[currentIndex], currentIndex);
+						if (completed === false && !isRunStopped(run)) {
+							queue.unshift(currentIndex);
+							queue.sort(function (a, b) { return a - b; });
+						}
+					}
 				}
-			}
 
-			for (let i = 0; i < workerCount; i++) {
-				runners.push(runNext());
-			}
+				for (let i = 0; i < workerCount; i++) {
+					runners.push(runNext());
+				}
 
-			await Promise.all(runners);
+				await Promise.all(runners);
+			}
 		}
 
 		function normalizeBatchInputControl(control) {
@@ -5824,6 +6017,11 @@ function generateHTML(备案内容) {
 				description = '已完成 ' + completedCount + ' 个，当前有效 ' + successCount + ' 个。';
 				meta = completedCount + ' / ' + totalTargets + ' 已完成，结果会持续追加。';
 				pillText = 'Running';
+			} else if (appState === 'paused') {
+				headline = '检测已暂停';
+				description = '已完成 ' + completedCount + ' / ' + totalTargets + '，当前有效 ' + successCount + ' 个。';
+				meta = '检测已暂停，正在进行的请求已挂起并将在点击“继续检测”后重新检测。';
+				pillText = 'Paused';
 			} else if (appState === 'done') {
 				headline = '检测完成';
 				description = '有效 ' + successCount + ' / ' + totalTargets + '，失败 ' + failCount + '。';
@@ -5856,7 +6054,7 @@ function generateHTML(备案内容) {
 		function updateProgress() {
 			const percent = totalTargets > 0 ? Math.round((completedCount / totalTargets) * 100) : 0;
 			progressBar.style.width = percent + '%';
-			progressText.innerText = completedCount + ' / ' + totalTargets;
+			progressText.innerText = (activeRun && activeRun.paused ? '已暂停 · ' : '') + completedCount + ' / ' + totalTargets;
 			renderDashboard();
 		}
 
@@ -7037,12 +7235,28 @@ function generateHTML(备案内容) {
 		}
 
 		async function checkIP(target, itemObj, run) {
-			if (isRunStopped(run)) return;
+			if (isRunStopped(run)) return false;
+			if (isRunPaused(run)) return false;
 			itemObj = itemObj || addResultItem(target);
 			const resultRecord = itemObj.record;
 
+			itemObj.badge.className = 'status-badge status-pending';
+			itemObj.badge.innerText = '检测中';
+
 			try {
-				const result = await fetchJsonWithTimeout('/check?proxy=' + encodeURIComponent(target), {}, 30000, run?.controller.signal);
+				const result = await fetchJsonWithTimeout('/check?proxy=' + encodeURIComponent(target), {}, 30000, getRunActiveSignal(run));
+				if (isRunPaused(run)) {
+					if (resultRecord) resultRecord.status = 'pending';
+					itemObj.badge.className = 'status-badge status-pending';
+					itemObj.badge.innerText = '已暂停';
+					itemObj.info.innerHTML =
+						'<span class="result-label">候选目标</span>' +
+						buildCopyableTarget(target) +
+						'<span class="result-detail">检测已暂停，点击“继续检测”后将继续验证该目标。</span>';
+					itemObj.meta.innerHTML = buildMetaChip('队列已暂停', 'prep');
+					itemObj.exitList.innerHTML = '';
+					return false;
+				}
 				const data = normalizeCheckDataForUi(result.payload || {
 					success: false,
 					error: '检测接口没有返回有效 JSON'
@@ -7123,7 +7337,19 @@ function generateHTML(备案内容) {
 					itemObj.exitList.innerHTML = '';
 					updateProgress();
 					updateResultFilters();
-					return;
+					return false;
+				}
+				if (isRunPaused(run)) {
+					if (resultRecord) resultRecord.status = 'pending';
+					itemObj.badge.className = 'status-badge status-pending';
+					itemObj.badge.innerText = '已暂停';
+					itemObj.info.innerHTML =
+						'<span class="result-label">候选目标</span>' +
+						buildCopyableTarget(target) +
+						'<span class="result-detail">检测已暂停，点击“继续检测”后将继续验证该目标。</span>';
+					itemObj.meta.innerHTML = buildMetaChip('队列已暂停', 'prep');
+					itemObj.exitList.innerHTML = '';
+					return false;
 				}
 				completedCount++;
 				updateResultRecordAsError(resultRecord, null);
@@ -7143,6 +7369,7 @@ function generateHTML(备案内容) {
 
 			updateProgress();
 			updateResultFilters();
+			return true;
 		}
 
 		function showDetails(card, exitData) {
@@ -7300,6 +7527,10 @@ function generateHTML(备案内容) {
 
 		resultsDiv.addEventListener('click', handleCopyTargetClick);
 
+		if (pauseBtn) {
+			pauseBtn.addEventListener('click', togglePauseActiveRun);
+		}
+
 		checkBtn.addEventListener('click', async function () {
 			if (activeRun) {
 				stopActiveRun();
@@ -7332,7 +7563,10 @@ function generateHTML(备案内容) {
 
 			const run = {
 				controller: new AbortController(),
-				cancelled: false
+				activeController: new AbortController(),
+				cancelled: false,
+				paused: false,
+				resumeResolvers: []
 			};
 			activeRun = run;
 			setCheckButtonRunning(true);
@@ -7365,9 +7599,10 @@ function generateHTML(备案内容) {
 
 				if (allResolvedTargets.length > 0) {
 					totalTargets = allResolvedTargets.length;
+					await waitForRunIfPaused(run);
+					throwIfRunStopped(run);
 					setAppState('running');
 					updateProgress();
-					throwIfRunStopped(run);
 
 					let checkJobs = [];
 					isCreatingResultBatch = true;
